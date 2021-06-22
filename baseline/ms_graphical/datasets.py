@@ -35,7 +35,7 @@ def LoadKddcup(filename='kddcup.csv'):
 
 def LoadCensus(filename_or_df='census.csv'):
     if isinstance(filename_or_df, str):
-        filename_or_df = '../datasets/{}'.format(filename_or_df)
+        filename_or_df = '../../../datasets/{}'.format(filename_or_df)
     else:
         assert (isinstance(filename_or_df, pd.DataFrame))
     cols =[0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
