@@ -145,7 +145,7 @@ JOB_LIGHT_BASE = {
     'layers': 4,
     # Eval:
     'compute_test_loss': True,
-    'queries_csv': './queries/job-light.csv',
+    'queries_csv': '../queries/job-light.csv',
     'num_eval_queries_per_iteration': 0,
     'num_eval_queries_at_end': 70,
     'eval_psamples': [4000],

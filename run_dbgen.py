@@ -1120,8 +1120,13 @@ class NeuroCard(tune.Trainable):
                 title_num = 0
                 total_weight = 0
 
+
                 for weight in self.sampled_tables.values():
                     total_weight += weight
+
+                    # scale the weight
+
+                    weight = weight * self.train_data.cardinality/(100000 * (iter_num + 1))
                     if weight >= 1.:
                         title_num += round(weight)
 
