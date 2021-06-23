@@ -1105,10 +1105,12 @@ class NeuroCard(tune.Trainable):
     def _train(self):
         if self.checkpoint_to_load or self.eval_join_sampling:
             model = self.model
+
+            batch_size = 100000
             for iter_num in range(1000):
                 print("iter_num = {}".format(iter_num+1))
                 begin_time = t1 = time.time()
-                sampled = model.sample(num=100000, device=train_utils.get_device())
+                sampled = model.sample(num=batch_size, device=train_utils.get_device())
                 dur = time.time()-t1
                 print("sample time {}ms".format(dur * 1000))
 
@@ -1119,6 +1121,9 @@ class NeuroCard(tune.Trainable):
 
                 title_num = 0
                 total_weight = 0
+                title_num_scaled = 0
+
+                scale_value = self.table.cardinality / (batch_size*(iter_num+1))
 
 
                 for weight in self.sampled_tables.values():
@@ -1129,15 +1134,24 @@ class NeuroCard(tune.Trainable):
                     weight = weight * self.train_data.cardinality/(100000 * (iter_num + 1))
                     if weight >= 1.:
                         title_num += round(weight)
+                    if weight * scale_value >= 1.:
+                        title_num_scaled += round(weight * scale_value)
 
                 view_num1 = 0
+                view_num1_scaled = 0
+
                 for weight in self.sampled_views[0].values():
                     if weight >= 1.:
                         view_num1 += round(weight)
+                    if weight * scale_value >= 1.:
+                        view_num1_scaled += round(weight * scale_value)
 
                 print("sampled {} tuples for title".format(title_num))
                 print("sampled {} tuples for view 1".format(view_num1))
                 print("total weight {}".format(total_weight))
+
+                print("sampled {} tuples for title after scaled".format(title_num_scaled))
+                print("sampled {} tuples for view 1 after scaled".format(view_num1_scaled))
 
                 print("sampled {} distinct value for title".format(len(self.sampled_tables)))
 
