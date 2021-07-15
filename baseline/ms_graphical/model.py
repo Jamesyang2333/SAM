@@ -84,19 +84,47 @@ def get_var_idx(cols, ops, vals, interval_list, clique, offset):
         col_idx = clique.index(col)
         val = vals[i]
         var_idx_list[col_idx] = list(range(len(interval_list[col])))
+        # if ops[i] == "=":
+        #     # when val is nan, assign the largest idx
+        #     if val != val:
+        #         var_idx_list[col_idx] = [len(interval_list[col])]
+        #     else:
+        #         var_idx_list[col_idx] = [interval_list[col].index(val)]
+        # elif ops[i] == ">=":
+        #     var_idx_list[col_idx] = var_idx_list[col_idx][var_idx_list[col_idx].index(interval_list[col].index(val)):]
+        # else:
+        #     column = table.columns[table.ColumnIndex(col)]
+        #     all_distinct_values = list(column.all_distinct_values)
+        #     if all_distinct_values.index(val) < len(all_distinct_values) - 1:
+        #         var_idx_list[col_idx] = var_idx_list[col_idx][:var_idx_list[col_idx].index(interval_list[col].index(all_distinct_values[all_distinct_values.index(val) + 1]))]
+        val_exist = True
+        # skip the step if value is nan
+        if val == val:
+            if val not in interval_list[col]:
+                idx = bisect.bisect(interval_list[col], val)
+                val_exist = False
+            else:
+                idx = interval_list[col].index(val)
         if ops[i] == "=":
             # when val is nan, assign the largest idx
             if val != val:
                 var_idx_list[col_idx] = [len(interval_list[col])]
             else:
-                var_idx_list[col_idx] = [interval_list[col].index(val)]
+                var_idx_list[col_idx] = [idx]
         elif ops[i] == ">=":
-            var_idx_list[col_idx] = var_idx_list[col_idx][var_idx_list[col_idx].index(interval_list[col].index(val)):]
-        else:
-            column = table.columns[table.ColumnIndex(col)]
-            all_distinct_values = list(column.all_distinct_values)
-            if all_distinct_values.index(val) < len(all_distinct_values) - 1:
-                var_idx_list[col_idx] = var_idx_list[col_idx][:var_idx_list[col_idx].index(interval_list[col].index(all_distinct_values[all_distinct_values.index(val) + 1]))]
+            var_idx_list[col_idx] = var_idx_list[col_idx][var_idx_list[col_idx].index(idx):]
+        elif ops[i] == ">":
+            if val_exist:
+                var_idx_list[col_idx] = var_idx_list[col_idx][var_idx_list[col_idx].index(idx + 1):]
+            else:
+                var_idx_list[col_idx] = var_idx_list[col_idx][var_idx_list[col_idx].index(idx):]
+        elif ops[i] == "<=":
+            if val_exist:
+                var_idx_list[col_idx] = var_idx_list[col_idx][:var_idx_list[col_idx].index(idx + 1)]
+            else:
+                var_idx_list[col_idx] = var_idx_list[col_idx][:var_idx_list[col_idx].index(idx)]
+        elif ops[i] == "<":
+            var_idx_list[col_idx] = var_idx_list[col_idx][:var_idx_list[col_idx].index(idx)]
 
     # for columns not filtered, all variables include nan are possible
     for i in range(len(clique)):
@@ -199,13 +227,37 @@ for i in range(train_num):
         all_distinct_values = list(column.all_distinct_values)
         if isinstance(type(vals[j]), type(all_distinct_values[-1])) is False:
                 vals[j] = type(all_distinct_values[-1])(vals[j])
+        # if vals[j] not in all_distinct_values:
+        #     print(j)
+        #     print(vals[j])
+        #     print(type(vals[j]))
+        #     print(all_distinct_values)
+        #     print(type(all_distinct_values[5]))
+        # idx = all_distinct_values.index(vals[j])
+        # if ops[j] == "=":
+        #     if all_distinct_values[idx] != float("nan"):
+        #         interval_dict[cols[j]].add(all_distinct_values[idx])
+        #         interval_dict_idx[cols[j]].add(idx)
+        #     if idx + 1 < len(all_distinct_values):
+        #         if all_distinct_values[idx + 1] != float("nan"):
+        #             interval_dict[cols[j]].add(all_distinct_values[idx + 1])
+        #             interval_dict_idx[cols[j]].add(idx + 1)
+        # if ops[j] == ">=":
+        #     if all_distinct_values[idx] != float("nan"):
+        #         interval_dict[cols[j]].add(all_distinct_values[idx])
+        #         interval_dict_idx[cols[j]].add(idx)
+        # if ops[j] == "<=":
+        #     if idx + 1 < len(all_distinct_values):
+        #         if all_distinct_values[idx + 1] != float("nan"):
+        #             interval_dict[cols[j]].add(all_distinct_values[idx + 1])
+        #             interval_dict_idx[cols[j]].add(idx + 1)
+        val_exist = True
         if vals[j] not in all_distinct_values:
-            print(j)
-            print(vals[j])
-            print(type(vals[j]))
-            print(all_distinct_values)
-            print(type(all_distinct_values[5]))
-        idx = all_distinct_values.index(vals[j])
+            idx = bisect.bisect(all_distinct_values, vals[j])
+            val_exist = False
+        else:
+            idx = all_distinct_values.index(vals[j])
+
         if ops[j] == "=":
             if all_distinct_values[idx] != float("nan"):
                 interval_dict[cols[j]].add(all_distinct_values[idx])
@@ -218,11 +270,32 @@ for i in range(train_num):
             if all_distinct_values[idx] != float("nan"):
                 interval_dict[cols[j]].add(all_distinct_values[idx])
                 interval_dict_idx[cols[j]].add(idx)
+        if ops[j] == ">":
+            if val_exist:
+                if idx + 1 < len(all_distinct_values):
+                    if all_distinct_values[idx + 1] != float("nan"):
+                        interval_dict[cols[j]].add(all_distinct_values[idx + 1])
+                        interval_dict_idx[cols[j]].add(idx + 1)
+            else:
+                if idx < len(all_distinct_values):
+                    if all_distinct_values[idx] != float("nan"):
+                        interval_dict[cols[j]].add(all_distinct_values[idx])
+                        interval_dict_idx[cols[j]].add(idx)
         if ops[j] == "<=":
-            if idx + 1 < len(all_distinct_values):
-                if all_distinct_values[idx + 1] != float("nan"):
-                    interval_dict[cols[j]].add(all_distinct_values[idx + 1])
-                    interval_dict_idx[cols[j]].add(idx + 1)
+            if val_exist:
+                if idx + 1 < len(all_distinct_values):
+                    if all_distinct_values[idx + 1] != float("nan"):
+                        interval_dict[cols[j]].add(all_distinct_values[idx + 1])
+                        interval_dict_idx[cols[j]].add(idx + 1)
+            else:
+                if idx < len(all_distinct_values):
+                    if all_distinct_values[idx] != float("nan"):
+                        interval_dict[cols[j]].add(all_distinct_values[idx])
+                        interval_dict_idx[cols[j]].add(idx)
+        if ops[j] == "<":
+            if all_distinct_values[idx] != float("nan"):
+                interval_dict[cols[j]].add(all_distinct_values[idx])
+                interval_dict_idx[cols[j]].add(idx)
 
 for col in table.Columns():
     all_distinct_values = list(col.all_distinct_values)

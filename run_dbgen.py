@@ -882,6 +882,10 @@ class NeuroCard(tune.Trainable):
                 else:
                     fanout_dics[table_id].append(col_id)
 
+            # print("printing all table fanout columns: ")
+            # for table_id in range(num_tables):
+            #     print("table id: {}, fanout columns: {}".format(table_id, fanout_dics[table_id]))
+
         return content_dics, indicator_dics, fanout_dics
 
 
@@ -1031,6 +1035,8 @@ class NeuroCard(tune.Trainable):
     def ProcessSampled(self, sampled):
         sampled = sampled.cpu().numpy()
 
+        not_full_count = 0
+
         for tuple in sampled:
             # for primary key table
             primary_id = self.sampled_table_idx
@@ -1038,16 +1044,22 @@ class NeuroCard(tune.Trainable):
 
             if tuple[pri_indicator_id] != 0:
                 weight = 1.
+                not_full = False
                 for i in range(len(self.join_tables)):
                     if i != primary_id:
-                        fanout_id = self.fanout_dics[i][0]
-                        fanout = tuple[fanout_id]
-                        if fanout <= 1:
-                            fanout = 1.
+                        if tuple[self.indicator_dics[i]] != 0:
+                            fanout_id = self.fanout_dics[i][0]
+                            fanout = tuple[fanout_id]
+                            if fanout <= 1:
+                                fanout = 1.
+                            else:
+                                fanout = float(fanout - 1)
+                            weight = weight / fanout
                         else:
-                            fanout = float(fanout - 1)
+                            not_full = True
 
-                        weight = weight / fanout
+                if not_full:
+                    not_full_count += 1
                 content = []
 
                 for content_id in self.content_dics[primary_id]:
@@ -1092,6 +1104,7 @@ class NeuroCard(tune.Trainable):
                     else:
                         self.sampled_views[view_id][content] += weight
         print(sampled)
+        print("number of not full join sampled: {}".format(not_full_count))
 
     def _simple_save(self):
         semi_str = 'usesemi' if self.semi_train else 'nosemi'
@@ -1107,6 +1120,7 @@ class NeuroCard(tune.Trainable):
             model = self.model
 
             batch_size = 100000
+            print("join cardinality: {}".format(self.table.cardinality))
             for iter_num in range(1000):
                 print("iter_num = {}".format(iter_num+1))
                 begin_time = t1 = time.time()
@@ -1128,10 +1142,6 @@ class NeuroCard(tune.Trainable):
 
                 for weight in self.sampled_tables.values():
                     total_weight += weight
-
-                    # scale the weight
-
-                    weight = weight * self.train_data.cardinality/(100000 * (iter_num + 1))
                     if weight >= 1.:
                         title_num += round(weight)
                     if weight * scale_value >= 1.:
@@ -1149,6 +1159,7 @@ class NeuroCard(tune.Trainable):
                 print("sampled {} tuples for title".format(title_num))
                 print("sampled {} tuples for view 1".format(view_num1))
                 print("total weight {}".format(total_weight))
+                print("total weight scaled {}".format(total_weight * scale_value))
 
                 print("sampled {} tuples for title after scaled".format(title_num_scaled))
                 print("sampled {} tuples for view 1 after scaled".format(view_num1_scaled))
