@@ -592,6 +592,7 @@ class NeuroCard(tune.Trainable):
                 # Train on a single table.
                 table = loaded_tables[0]
 
+            self.loaded_tables = loaded_tables
         if self.dataset != 'imdb' or len(self.join_tables) == 1:
             table.data.info()
             self.train_data = self.MakeTableDataset(table)
@@ -713,6 +714,11 @@ class NeuroCard(tune.Trainable):
         for i in range(len(self.join_tables)):
             if i != table_primary_index:
                 self.sampled_view_idx.append([table_primary_index, i])
+
+        self.gt_caches = {}
+        self.unique_rows = None
+
+        self.sampled_table_nums = [0] * len(self.join_tables)
 
 
     def LoadCheckpoint(self):
@@ -875,8 +881,23 @@ class NeuroCard(tune.Trainable):
                 col_type = table_column_types[col_id]
                 table_id = int(table_indexes[col_id])
 
+                table_name = self.join_tables[table_id]
+                table_key = table_name + '.csv'
+                cols_candidate = datasets.JoinOrderBenchmark.BASE_TABLE_PRED_COLS[table_key]
+
                 if col_type == common.TYPE_NORMAL_ATTR:
-                    content_dics[table_id].append(col_id)
+                    if table_id == 4 and col.name.split(':')[-1] in ['kind_id', 'production_year']:
+                        content_dics[table_id].append(col_id)
+                    elif table_id == 0 and col.name.split(':')[-1] in ['role_id', 'person_id_fact_0', 'person_id_fact_1']:
+                        content_dics[table_id].append(col_id)
+                    elif table_id == 1 and col.name.split(':')[-1] in ['company_id_fact_0', 'company_id_fact_1', 'company_type_id']:
+                        content_dics[table_id].append(col_id)
+                    elif table_id == 2 and col.name.split(':')[-1] == 'info_type_id':
+                        content_dics[table_id].append(col_id)
+                    elif table_id == 3 and col.name.split(':')[-1] in ['keyword_id_fact_0', 'keyword_id_fact_1']:
+                        content_dics[table_id].append(col_id)
+                    elif table_id == 5 and col.name.split(':')[-1] == 'info_type_id':
+                        content_dics[table_id].append(col_id)
                 elif col_type == common.TYPE_INDICATOR:
                     indicator_dics[table_id] = col_id
                 else:
@@ -884,7 +905,82 @@ class NeuroCard(tune.Trainable):
 
         return content_dics, indicator_dics, fanout_dics
 
+    def ComputeCE(self, gt_table, gen_table, gt_caches, eps=1e-9):
+        col_names = gt_table.columns.tolist()
+        unique_rows = list(gt_table.groupby(col_names).groups)
+        ce = 0.
 
+        if not len(gt_caches):
+            gt_counts_df = gt_table.groupby(col_names).size().reset_index(name='counts')
+        gen_counts_df = gen_table.groupby(col_names).size().reset_index(name='counts')
+
+
+        for row in unique_rows:
+            value = list(row)
+            value_str = ','.join(value)
+
+            if value_str in gt_caches:
+                gt_prob = gt_caches[value_str]
+            else:
+                gt_prob = gt_counts_df[gt_counts_df[col_names[0]] == value[0]]
+                for i in range(len(col_names) - 1):
+                    gt_prob = gt_prob[gt_prob[col_names[i + 1]] == value[i + 1]]
+                gt_prob = gt_prob.iloc[0]['counts'] / len(gt_table)
+
+                gt_caches[value_str] = gt_prob
+
+            gen_prob = gen_counts_df[gen_counts_df[col_names[0]] == value[0]]
+            for i in range(len(col_names) - 1):
+                gen_prob = gen_prob[gen_prob[col_names[i + 1]] == value[i + 1]]
+            if len(gen_prob) > 0:
+                gen_prob = gen_prob.iloc[0]['counts'] / len(gen_table)
+            else:
+                gen_prob = eps
+
+            ce -= gt_prob * np.log(gen_prob)
+
+        return ce
+
+    def AR_ComputeCE(self, gt_table, gen_table_dics, gen_total_num, gt_caches, eps=1e-9):
+        col_names = ['production_year', 'kind_id']
+        gt_table = gt_table.fillna(-1)
+        print ('start group by')
+        if self.unique_rows is None:
+            self.unique_rows = list(gt_table.groupby(col_names).groups)
+        ce = 0.
+
+        if not len(gt_caches):
+            print ('start group by for gt counts')
+            gt_counts_df = gt_table.groupby(col_names).size().reset_index(name='counts')
+
+        for row in self.unique_rows:
+            value = list(row)
+            value_str = [str(float(i)) for i in value]
+            value_str = ','.join(value_str)
+
+
+            if value_str in gt_caches:
+                gt_prob = gt_caches[value_str]
+            else:
+                gt_prob = gt_counts_df[gt_counts_df[col_names[0]] == value[0]]
+                for i in range(len(col_names) - 1):
+                    gt_prob = gt_prob[gt_prob[col_names[i + 1]] == value[i + 1]]
+                gt_prob = gt_prob.iloc[0]['counts'] / len(gt_table)
+
+                gt_caches[value_str] = gt_prob
+
+            # value_id_format = []
+            # for i, col_value in enumerate(value):
+            #     value_id_format.append(look_up_list[i][col_value])
+            # value_id_format = ','.join(value_id_format)
+            if value_str in gen_table_dics:
+                gen_prob = gen_table_dics[value_str] / gen_total_num
+            else:
+                gen_prob = eps
+
+            ce -= gt_prob * np.log(gen_prob)
+
+        return ce
 
     def MakeModel(self, table, train_data, table_primary_index=None):
         cols_to_train = table.columns
@@ -1039,7 +1135,7 @@ class NeuroCard(tune.Trainable):
             if tuple[pri_indicator_id] != 0:
                 weight = 1.
                 for i in range(len(self.join_tables)):
-                    if i != primary_id:
+                    if i != primary_id and tuple[self.indicator_dics[i]] != 0:
                         fanout_id = self.fanout_dics[i][0]
                         fanout = tuple[fanout_id]
                         if fanout <= 1:
@@ -1068,7 +1164,8 @@ class NeuroCard(tune.Trainable):
                 if tuple[pri_indicator_id] != 0 and tuple[indicator_id] != 0:
                     weight = 1.
                     for i in range(len(self.join_tables)):
-                        if i != primary_id and i != joined_table:
+                        if i != primary_id and i != joined_table and \
+                                tuple[self.indicator_dics[i]] != 0:
                             fanout_id = self.fanout_dics[i][0]
                             fanout = tuple[fanout_id]
                             if fanout <= 1:
@@ -1108,6 +1205,7 @@ class NeuroCard(tune.Trainable):
 
             batch_size = 100000
             for iter_num in range(1000):
+                self.sampled_table_nums = [0] * len(self.join_tables)
                 print("iter_num = {}".format(iter_num+1))
                 begin_time = t1 = time.time()
                 sampled = model.sample(num=batch_size, device=train_utils.get_device())
@@ -1119,34 +1217,312 @@ class NeuroCard(tune.Trainable):
                 dur = time.time() - t1
                 print("process time {}ms".format(dur * 1000))
 
+                ####### assign pk to title #######
                 title_num = 0
                 total_weight = 0
                 title_num_scaled = 0
 
                 scale_value = self.table.cardinality / (batch_size*(iter_num+1))
 
-                for weight in self.sampled_tables.values():
+                gt_table = self.loaded_tables[self.sampled_table_idx].data
+                gt_table = gt_table[['production_year', 'kind_id']]
+
+                pk_look_up_list = []
+                pk_look_up_list.append(self.loaded_tables[self.sampled_table_idx]['production_year'].all_distinct_values)
+                pk_look_up_list.append(self.loaded_tables[self.sampled_table_idx]['kind_id'].all_distinct_values)
+
+                sample_table_count = {}
+                sample_pk_table_res = {}
+                sample_pk_table_list = []
+
+                for value_key in self.sampled_tables:
+                    weight = self.sampled_tables[value_key]
                     total_weight += weight
                     if weight >= 1.:
                         title_num += round(weight)
                     if weight * scale_value >= 1.:
                         title_num_scaled += round(weight * scale_value)
 
-                view_num1 = 0
-                view_num1_scaled = 0
+                        sampled_idxs = value_key.split(',')
+                        value_str = []
+                        for i, sampled_idx in enumerate(sampled_idxs):
+                            sampled_value = pk_look_up_list[i][int(float(sampled_idx))]
+                            if np.isnan(sampled_value):
+                                value_str.append('-1')
+                            else:
+                                value_str.append(str(sampled_value))
 
-                for weight in self.sampled_views[0].values():
-                    if weight >= 1.:
-                        view_num1 += round(weight)
-                    if weight * scale_value >= 1.:
-                        view_num1_scaled += round(weight * scale_value)
+                        value_str = ','.join(value_str)
+                        sample_table_count[value_str] = round(weight * scale_value)
+
+                title_scale_value = float(self.loaded_tables[self.sampled_table_idx].cardinality) \
+                                    / float(title_num_scaled)
+
+                for value in sample_table_count:
+                    count = sample_table_count[value]
+                    count_scaled = int(round(count * title_scale_value))
+                    sample_pk_table_res[value] = range(self.sampled_table_nums[self.sampled_table_idx],
+                                                       self.sampled_table_nums[self.sampled_table_idx] + count_scaled)
+
+                    value_list = value.split(',')
+                    for i, v in enumerate(value_list):
+                        if v == -1:
+                            value_list[i] = ''
+                    value_str_csv = ','.join(value_list)
+
+                    for _ in range (count_scaled):
+                        sample_pk_table_list.append(value_str_csv)
+
+                    self.sampled_table_nums[self.sampled_table_idx] += count_scaled
+
+
+                ####### assign fk to other tables #######
+
+                view_num_list = [0] * len(self.sampled_views)
+                view_num_scaled_list = [0] * len(self.sampled_views)
+                view_count_list = []
+                for _ in range(len(self.sampled_views)):
+                    view_count_list.append({})
+
+
+                sample_fk_table_contents_list = []
+                sample_fk_table_fks_list = []
+
+                for view_id in range(len(self.sampled_views)):
+                    print(view_id)
+                    sample_fk_table_contents = []
+                    sample_fk_table_fks = []
+
+                    if view_id == 0:
+                        fk_table = self.loaded_tables[0].data
+                        fk_table = fk_table[['role_id', 'person_id']]
+                        look_up_list = []
+                        look_up_list.append(self.loaded_tables[0]['role_id'].all_distinct_values)
+                        look_up_list.append(self.loaded_tables[0]['person_id'].all_distinct_values)
+                    elif view_id == 1:
+                        fk_table = self.loaded_tables[1].data
+                        fk_table = fk_table[['company_type_id', 'company_id']]
+                        look_up_list = []
+                        look_up_list.append(self.loaded_tables[1]['company_type_id'].all_distinct_values)
+                        look_up_list.append(self.loaded_tables[1]['company_id'].all_distinct_values)
+                    elif view_id == 2:
+                        fk_table = self.loaded_tables[2].data
+                        fk_table = fk_table[['info_type_id']]
+                        look_up_list = []
+                        look_up_list.append(self.loaded_tables[2]['info_type_id'].all_distinct_values)
+                    elif view_id == 3:
+                        fk_table = self.loaded_tables[3].data
+                        fk_table = fk_table[['keyword_id']]
+                        look_up_list = []
+                        look_up_list.append(self.loaded_tables[3]['keyword_id'].all_distinct_values)
+                    elif view_id == 4:
+                        fk_table = self.loaded_tables[5].data
+                        fk_table = fk_table[['info_type_id']]
+                        look_up_list = []
+                        look_up_list.append(self.loaded_tables[5]['info_type_id'].all_distinct_values)
+
+                    for value_key in self.sampled_views[view_id]:
+                        sampled_idxs = value_key.split(',')
+                        if view_id == 0 or view_id == 1:
+                            col_id_fact_0 = self.content_dics[view_id][1]
+                            col_id_fact_1 = self.content_dics[view_id][2]
+
+                            sampled_idx_fact_0 = int(
+                                self.train_data.columns[col_id_fact_0].all_distinct_values[int(float(sampled_idxs[3]))]) \
+                                                 << self.train_data.columns[col_id_fact_0].bit_offset
+
+                            sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[
+                                                         int(float(sampled_idxs[4]))]) \
+                                                 << self.train_data.columns[col_id_fact_1].bit_offset
+
+                            sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
+
+                            if view_id == 0:
+                                original_size = self.loaded_tables[0]['person_id'].distribution_size
+                            else:
+                                original_size = self.loaded_tables[1]['company_id'].distribution_size
+
+                            if sampled_idx_final >= original_size:
+                                continue
+
+                        elif view_id == 3:
+                            col_id_fact_0 = self.content_dics[view_id][0]
+                            col_id_fact_1 = self.content_dics[view_id][1]
+
+                            sampled_idx_fact_0 = int(
+                                self.train_data.columns[col_id_fact_0].all_distinct_values[int(float(sampled_idxs[2]))]) \
+                                                 << self.train_data.columns[col_id_fact_0].bit_offset
+
+                            sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[
+                                                         int(float(sampled_idxs[3]))]) \
+                                                 << self.train_data.columns[col_id_fact_1].bit_offset
+
+                            sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
+
+                            original_size = self.loaded_tables[3]['keyword_id'].distribution_size
+
+                            if sampled_idx_final >= original_size:
+                                continue
+
+                        weight = self.sampled_views[view_id][value_key]
+                        if weight >= 1.:
+                            view_num_list[view_id] += round(weight)
+                        if weight * scale_value >= 1.:
+                            view_num_scaled_list[view_id] += round(weight * scale_value)
+                            view_count_list[view_id][value_key] = round(weight * scale_value)
+
+                    if view_id < 4:
+                        joined_table_id = view_id
+                    else:
+                        joined_table_id = view_id + 1
+
+                    for value_key in view_count_list[view_id]:
+                        sampled_idxs = value_key.split(',')
+                        count = view_count_list[view_id][value_key]
+
+                        pk_value_str = []
+                        value_str = []
+                        value_str_csv = []
+
+                        for i, sampled_idx in enumerate(sampled_idxs):
+                            if i < 2:
+                                sampled_value = pk_look_up_list[i][int(float(sampled_idx))]
+                                if np.isnan(sampled_value):
+                                    pk_value_str.append('-1')
+                                else:
+                                    pk_value_str.append(str(sampled_value))
+                            else:
+                                look_up_id = i - 2
+                                if view_id == 0 or view_id == 1:
+                                    if look_up_id == 0:
+                                        sampled_value = look_up_list[look_up_id][int(float(sampled_idx))]
+                                        if np.isnan(sampled_value):
+                                            value_str.append('-1')
+                                            value_str_csv.append('')
+                                        else:
+                                            value_str.append(str(sampled_value))
+                                            value_str_csv.append(str(sampled_value))
+                                    elif look_up_id == 1:
+                                        col_id_fact_0 = self.content_dics[view_id][1]
+                                        col_id_fact_1 = self.content_dics[view_id][2]
+
+                                        sampled_idx_fact_0 = int(self.train_data.columns[col_id_fact_0].all_distinct_values[int(float(sampled_idx))]) \
+                                                             << self.train_data.columns[col_id_fact_0].bit_offset
+
+                                        sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[int(float(sampled_idxs[i+1]))]) \
+                                                             << self.train_data.columns[col_id_fact_1].bit_offset
+
+                                        sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
+
+                                        sampled_value = look_up_list[look_up_id][sampled_idx_final]
+                                        if np.isnan(sampled_value):
+                                            value_str.append('-1')
+                                            value_str_csv.append('')
+                                        else:
+                                            value_str.append(str(sampled_value))
+                                            value_str_csv.append(str(sampled_value))
+                                elif view_id == 2 or view_id == 4:
+                                    sampled_value = look_up_list[look_up_id][int(float(sampled_idx))]
+                                    if np.isnan(sampled_value):
+                                        value_str.append('-1')
+                                        value_str_csv.append('')
+                                    else:
+                                        value_str.append(str(sampled_value))
+                                        value_str_csv.append(str(sampled_value))
+                                elif view_id == 3:
+                                    if look_up_id == 0:
+                                        col_id_fact_0 = self.content_dics[view_id][0]
+                                        col_id_fact_1 = self.content_dics[view_id][1]
+
+                                        sampled_idx_fact_0 = int(self.train_data.columns[col_id_fact_0].all_distinct_values[
+                                                                 int(float(sampled_idx))]) \
+                                                             << self.train_data.columns[col_id_fact_0].bit_offset
+
+                                        sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[
+                                                                 int(float(sampled_idxs[i + 1]))])\
+                                                             << self.train_data.columns[col_id_fact_1].bit_offset
+
+                                        sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
+
+                                        sampled_value = look_up_list[look_up_id][sampled_idx_final]
+                                        if np.isnan(sampled_value):
+                                            value_str.append('-1')
+                                            value_str_csv.append('')
+                                        else:
+                                            value_str.append(str(sampled_value))
+                                            value_str_csv.append(str(sampled_value))
+
+                        pk_value_str = ','.join(pk_value_str)
+                        value_str = ','.join(value_str)
+                        value_str_csv = ','.join(value_str_csv)
+
+                        if pk_value_str in sample_pk_table_res:
+                            correspond_pk = sample_pk_table_res[pk_value_str][0]
+                        else:
+                            correspond_pk = self.sampled_table_nums[self.sampled_table_idx]
+                            sample_pk_table_res[pk_value_str] = [correspond_pk]
+                            sample_pk_table_list.append(pk_value_str)
+                            self.sampled_table_nums[self.sampled_table_idx] += 1
+
+                        view_scale_value = self.loaded_tables[joined_table_id].cardinality / \
+                                                    view_num_scaled_list[view_id]
+
+
+                        for _ in range(int(round(view_scale_value * count))):
+                            sample_fk_table_fks.append(correspond_pk)
+                            sample_fk_table_contents.append(value_str_csv)
+
+                    sample_fk_table_contents_list.append(sample_fk_table_contents)
+                    sample_fk_table_fks_list.append(sample_fk_table_fks)
+
+                ####### write to csv files #######
+
+                if iter_num % 50 == 0:
+                    res_file = open('./db_generation/title_{}.csv'.format(str(iter_num)), 'w', encoding="utf8")
+                    res_file.write('id,production_year,kind_id\n')
+                    for i, a_sample in enumerate(sample_pk_table_list):
+                        if i == len(sample_pk_table_list) - 1:
+                            res_file.write(str(i) + ',' + a_sample)
+                        else:
+                            res_file.write(str(i) + ',' + a_sample + '\n')
+                    res_file.close()
+
+                    for fk_table_id in range(len(sample_fk_table_contents_list)):
+                        sample_fk_table_contents = sample_fk_table_contents_list[fk_table_id]
+                        sample_fk_table_fks = sample_fk_table_fks_list[fk_table_id]
+
+                        if fk_table_id == 0:
+                            fk_res_file = open('./db_generation/cast_info_{}.csv'.format(str(iter_num)), 'w', encoding="utf8")
+                            fk_res_file.write('movie_id,role_id,person_id\n')
+                        elif fk_table_id == 1:
+                            fk_res_file = open('./db_generation/movie_companies_{}.csv'.format(str(iter_num)), 'w', encoding="utf8")
+                            fk_res_file.write('movie_id,company_type_id,company_id\n')
+                        elif fk_table_id == 2:
+                            fk_res_file = open('./db_generation/movie_info_{}.csv'.format(str(iter_num)), 'w', encoding="utf8")
+                            fk_res_file.write('movie_id,info_type_id\n')
+                        elif fk_table_id == 3:
+                            fk_res_file = open('./db_generation/movie_keyword_{}.csv'.format(str(iter_num)), 'w', encoding="utf8")
+                            fk_res_file.write('movie_id,keyword_id\n')
+                        elif fk_table_id == 4:
+                            fk_res_file = open('./db_generation/movie_info_idx_{}.csv'.format(str(iter_num)), 'w', encoding="utf8")
+                            fk_res_file.write('movie_id,info_type_id\n')
+
+                        for i, (fk, content) in enumerate(zip(sample_fk_table_fks, sample_fk_table_contents)):
+                            if i == len(sample_fk_table_fks) - 1:
+                                fk_res_file.write(str(fk) + ',' + content)
+                            else:
+                                fk_res_file.write(str(fk) + ',' + content + '\n')
+                        fk_res_file.close()
+
+                ce = self.AR_ComputeCE(gt_table, sample_table_count, title_num_scaled, self.gt_caches)
+
+                print("generated ce: {}".format(ce))
 
                 print("sampled {} tuples for title".format(title_num))
-                print("sampled {} tuples for view 1".format(view_num1))
+                #print("sampled {} tuples for view 1".format(view_num1))
                 print("total weight {}".format(total_weight))
 
                 print("sampled {} tuples for title after scaled".format(title_num_scaled))
-                print("sampled {} tuples for view 1 after scaled".format(view_num1_scaled))
 
                 print("sampled {} distinct value for title".format(len(self.sampled_tables)))
 
