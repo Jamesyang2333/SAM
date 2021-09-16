@@ -175,3 +175,7 @@ def encode_data(predicates, column_min_max_vals, column2vec, op2vec):
                 pred_vec = np.zeros((len(column2vec) + len(op2vec) + 1))
             predicates_enc[i].append(pred_vec)
     return predicates_enc
+
+def get_qerror(pred, label):
+    qerror = np.maximum(pred/label, label/pred)
+    return qerror

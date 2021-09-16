@@ -191,6 +191,10 @@ if dataset == 'imdb':
 
 train_data_raw = load_dataset_join(
     "../../../queries/mscn_queries_neurocard_format.csv", join_tables, loaded_tables)
+
+
+# train_data_raw = load_dataset_join(
+#     "../../../queries/mscn_400.csv", join_tables, loaded_tables)
 print("Total number of queries: {}".format(len(train_data_raw)))
 
 idx_list_filter = []
@@ -217,7 +221,8 @@ print("Total number of queries after filter: {}".format(len(train_data_raw)))
 
 
 # train_num = len(train_data_raw["card"])
-train_num = 100
+# train_num = len(train_data_raw)
+train_num = 60
 
 for i in range(train_num):
     if len(train_data_raw[i]["tables"]) == 1:
@@ -574,37 +579,37 @@ for name in join_name_set:
     print("Total time takes for sampling {} tuples: {}".format(
         n_samples, end - start))
 
-    sample_frame = pd.DataFrame.from_dict(sample_view_dict[name])
+    sample_frame = pd.DataFrame.from_dict(sample_view_dict[name], dtype='float64')
     sample_frame_dict[name] = sample_frame
 
-    if name == "title":
-        # transform the data type of kind id to int, can be done in pandas
-        # sample_view_dict[name]["title.kind_id"] = [int(val) if val==val else -1 for val in sample_view_dict[name]["title.kind_id"]]
+# transform the data type of kind id to int, can be done in pandas
+# sample_view_dict[name]["title.kind_id"] = [int(val) if val==val else -1 for val in sample_view_dict[name]["title.kind_id"]]
 
-        origin_table = loaded_tables['title']
-        origin_table_cols = origin_table.Columns()
-        origin_dict = {}
-        eval_cols = ["title.production_year", "title.kind_id"]
-        sample_dict_eval = {}
+origin_table = loaded_tables['title']
+origin_table_cols = origin_table.Columns()
+origin_dict = {}
+eval_cols = ["title.production_year", "title.kind_id"]
+sample_dict_eval = {}
 
-        for col in eval_cols:
-            col_name = col.split('.')[1]
-            origin_dict[col] = origin_table_cols[origin_table.ColumnIndex(
-                col_name)].data
-            sample_dict_eval[col] = sample_view_dict[name][col]
+for col in eval_cols:
+    col_name = col.split('.')[1]
+    origin_dict[col] = origin_table_cols[origin_table.ColumnIndex(
+        col_name)].data
+    # print(sample_view_dict[name].keys())
+    sample_dict_eval[col] = sample_view_dict['title'][col]
 
-        origin_frame = pd.DataFrame.from_dict(origin_dict)
-        sample_frame_eval = pd.DataFrame.from_dict(sample_dict_eval)
+origin_frame = pd.DataFrame.from_dict(origin_dict)
+sample_frame_eval = pd.DataFrame.from_dict(sample_dict_eval)
 
-        # sample_frame_eval.astype({'title.kind_id': 'int64'})
+# sample_frame_eval.astype({'title.kind_id': 'int64'})
 
-        # print(origin_frame.head())
-        # print(origin_frame.dtypes)
-        # print(sample_frame_eval.head())
-        # print(sample_frame_eval.dtypes)
+# print(origin_frame.head())
+# print(origin_frame.dtypes)
+# print(sample_frame_eval.head())
+# print(sample_frame_eval.dtypes)
 
-        cross_entropy = ComputeCE(origin_frame, sample_frame, {})
-        print("cross entropy of title relation: {}".format(cross_entropy))
+cross_entropy = ComputeCE(origin_frame, sample_frame, {})
+print("cross entropy of title relation: {}".format(cross_entropy))
 
 relation_generation(sample_frame_dict, join_name_set)
 # title_cols = sample_frame_dict['title'].columns.tolist()
@@ -664,3 +669,4 @@ relation_generation(sample_frame_dict, join_name_set)
 #     generated_frame = pd.DataFrame.from_dict(sample_view_dict[name])
 
 #     sample_frame.to_csv('./generated_tables/{}.csv'.format(fk_table_name))
+

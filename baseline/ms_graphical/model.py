@@ -14,10 +14,7 @@ import argparse
 import datasets
 from data_loader import load_dataset
 from evaluate import Query
-
-def get_qerror(pred, label):
-    qerror = np.mean(np.maximum(pred/label, label/pred))
-    return qerror
+from utils import get_qerror
 
 def get_clique_idx(cols, clique_list):
     for i in range(len(clique_list)):
@@ -179,16 +176,17 @@ parser.add_argument("--train_num", help="number of queries used for generation",
 args = parser.parse_args()
 
 
-train_data_raw = load_dataset("census", "/home_nfs/jingyi/db_generation/queries/adult_10000_2cols.txt")
-idx_list_filter = []
-# get rid of queries with filter on both column 0 and 14
-for i in range(len(train_data_raw["card"])):
-    if not ((0 in train_data_raw["column"][i]) and (14 in train_data_raw["column"][i])):
-        idx_list_filter.append(i)
-train_data_raw["card"] = [train_data_raw["card"][i] for i in idx_list_filter]
-train_data_raw["column"] = [train_data_raw["column"][i] for i in idx_list_filter]
-train_data_raw["operator"] = [train_data_raw["operator"][i] for i in idx_list_filter]
-train_data_raw["val"] = [train_data_raw["val"][i] for i in idx_list_filter]
+train_data_raw = load_dataset("census", "/home_nfs/jingyi/db_generation/queries/adultworkload_with_card_21000.txt")
+# train_data_raw = load_dataset("dmv", "/home_nfs/jingyi/db_generation/queries/dmvworkload_with_card_21000.txt")
+# idx_list_filter = []
+# # get rid of queries with filter on both column 0 and 14
+# for i in range(len(train_data_raw["card"])):
+#     if not ((0 in train_data_raw["column"][i]) and (14 in train_data_raw["column"][i])):
+#         idx_list_filter.append(i)
+# train_data_raw["card"] = [train_data_raw["card"][i] for i in idx_list_filter]
+# train_data_raw["column"] = [train_data_raw["column"][i] for i in idx_list_filter]
+# train_data_raw["operator"] = [train_data_raw["operator"][i] for i in idx_list_filter]
+# train_data_raw["val"] = [train_data_raw["val"][i] for i in idx_list_filter]
 
 # train_num = len(train_data_raw["card"])
 train_num = args.train_num
@@ -198,6 +196,7 @@ print(train_num)
 
 G = nx.Graph()
 table = datasets.LoadCensus()
+# table = datasets.LoadDmv()
 interval_dict = {}
 interval_list = {}
 interval_dict_idx = {}
@@ -323,7 +322,10 @@ for col in table.columns:
 print("number of nodes: {}".format(G.number_of_nodes()))
 print("number of edges: {}".format(G.number_of_edges()))
 print(G.edges)
-print("graph is cordal: {}".format(nx.algorithms.chordal.is_chordal(G)))
+is_chordal = nx.algorithms.chordal.is_chordal(G)
+print("graph is cordal: {}".format(is_chordal))
+if not is_chordal:
+    G, _ = nx.algorithms.chordal.complete_to_chordal_graph(G)
 clique_set = nx.algorithms.chordal.chordal_graph_cliques(G)
 print(clique_set)
 clique_list = []
@@ -426,41 +428,45 @@ print(sol['message'])
 
 x = sol['x']
 
-cross_entropy = 0
-nan_count = 0
-for pos in range(table.cardinality):
+print("size of table: {}".format(table.cardinality))
 
-    contain_nan = False
-    for col in table.columns:
-        if table.data.loc[pos][col.name] != table.data.loc[pos][col.name]:
-            contain_nan = True
+# cross_entropy = 0
+# nan_count = 0
+# for pos in range(table.cardinality):
+#     if pos % 10000000 == 0:
+#         print("processed {} tuples".format(pos))
+
+#     contain_nan = False
+#     for col in table.columns:
+#         if table.data.loc[pos][col.name] != table.data.loc[pos][col.name]:
+#             contain_nan = True
     
-    if contain_nan:
-        nan_count += 1
+#     if contain_nan:
+#         nan_count += 1
 
-    total_prob = 1
-    for i in range(len(clique_list)):
-        vals = []
-        for col in clique_list[i]:
-            vals.append(table.data.loc[pos][col])
-        cur_prob = get_clique_prob(clique_list[i], vals, interval_list, interval_list_idx, clique_list[i], nvar_cum_sum_list[i], x)
-        total_prob *= cur_prob
+#     total_prob = 1
+#     for i in range(len(clique_list)):
+#         vals = []
+#         for col in clique_list[i]:
+#             vals.append(table.data.loc[pos][col])
+#         cur_prob = get_clique_prob(clique_list[i], vals, interval_list, interval_list_idx, clique_list[i], nvar_cum_sum_list[i], x)
+#         total_prob *= cur_prob
 
-    for i in range(len(clique_list)):
-        for j in range(i+1, len(clique_list)):
-            common_cols = list(set(clique_list[i]) & set(clique_list[j]))
-            common_cols.sort()
-            if common_cols:
-                vals = []
-                for col in common_cols:
-                    vals.append(table.data.loc[pos][col])
-                cur_prob = get_clique_prob(common_cols, vals, interval_list, interval_list_idx, clique_list[i], nvar_cum_sum_list[i], x)
-                total_prob /= cur_prob
+#     for i in range(len(clique_list)):
+#         for j in range(i+1, len(clique_list)):
+#             common_cols = list(set(clique_list[i]) & set(clique_list[j]))
+#             common_cols.sort()
+#             if common_cols:
+#                 vals = []
+#                 for col in common_cols:
+#                     vals.append(table.data.loc[pos][col])
+#                 cur_prob = get_clique_prob(common_cols, vals, interval_list, interval_list_idx, clique_list[i], nvar_cum_sum_list[i], x)
+#                 total_prob /= cur_prob
     
-    cross_entropy += (1/table.cardinality*math.log(total_prob))
-print("cross entropy: {}".format(-cross_entropy))
-print("total numebr of rows: {}".format(table.cardinality))
-print("number of rows containing nan: {}".format(nan_count))
+#     cross_entropy += (1/table.cardinality*math.log(total_prob))
+# print("cross entropy: {}".format(-cross_entropy))
+# print("total numebr of rows: {}".format(table.cardinality))
+# print("number of rows containing nan: {}".format(nan_count))
 
 
 print(clique_list)
@@ -470,9 +476,12 @@ for col in table.columns:
 
 n_samples = table.cardinality
 
+
 start = time.time()
 
 for _ in range(n_samples):
+    if _ % 10000000 == 0:
+        print("sampled {} tuples".format(_))
     val_dict = {}
     # val_list = []
     for i in range(len(clique_list)):
@@ -512,11 +521,12 @@ for _ in range(n_samples):
     for col in val_dict:
                 sample_dict[col].append(val_dict[col])
 
-sample_frame = pd.DataFrame.from_dict(sample_dict)
-sample_table = datasets.LoadCensus(sample_frame)
-
 end = time.time()
 print("Total time takes for sampling {} tuples: {}".format(n_samples, end - start))
+
+sample_frame = pd.DataFrame.from_dict(sample_dict)
+sample_table = datasets.LoadCensus(sample_frame)
+# sample_table = datasets.LoadDmv(sample_frame)
 
 card_pred = []
 for i in range(train_num):
@@ -526,5 +536,35 @@ for i in range(train_num):
     est = Query(sample_table, cols, ops, vals)
     card_pred.append(est / sample_table.cardinality)
 
-print("q error on generated dataset:  {}".format(get_qerror(np.array(card_pred), np.array(train_data_raw['card'][:train_num]))))
+q_error_list = get_qerror(np.array(card_pred), np.array(train_data_raw['card'][:train_num]))
+print("q error of input queries:")
+print("Max q error: {}".format(np.max(q_error_list)))
+print("99 percentile q error: {}".format(np.percentile(q_error_list, 99)))
+print("95 percentile q error: {}".format(np.percentile(q_error_list, 95)))
+print("90 percentile q error: {}".format(np.percentile(q_error_list, 90)))
+print("50 percentile q error: {}".format(np.percentile(q_error_list, 50)))
+print("Average q error: {}".format(np.mean(q_error_list)))
+
+
+start_idx = 20000
+test_num = 1000
+
+card_pred = []
+for i in range(start_idx, start_idx+test_num):
+    cols = [sample_table.columns[sample_table.ColumnIndex(col)] for col in train_data_raw['column'][i]]
+    ops = train_data_raw['operator'][i]
+    vals = train_data_raw['val'][i]
+    est = Query(sample_table, cols, ops, vals)
+    card_pred.append(est / sample_table.cardinality)
+
+q_error_list = get_qerror(np.array(card_pred), np.array(train_data_raw['card'][start_idx:start_idx+test_num]))
+print("q error of test queries:")
+print("Max q error: {}".format(np.max(q_error_list)))
+print("99 percentile q error: {}".format(np.percentile(q_error_list, 99)))
+print("95 percentile q error: {}".format(np.percentile(q_error_list, 95)))
+print("90 percentile q error: {}".format(np.percentile(q_error_list, 90)))
+print("50 percentile q error: {}".format(np.percentile(q_error_list, 50)))
+print("Average q error: {}".format(np.mean(q_error_list)))
+
+sample_frame.to_csv('./single_relation_results/census_num_{}.csv'.format(train_num), index=False)
 

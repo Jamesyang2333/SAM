@@ -15,17 +15,32 @@ OPS = {
 def Query(table, columns, operators, vals, return_masks=False, return_crad_and_masks=False):
     assert len(columns) == len(operators) == len(vals)
     bools = None
+    # print(table.name)
     for c, o, v in zip(columns, operators, vals):
-        if table.name in ['Adult', 'Census']:
+        if table.name in ['DMV', 'Census']:
             inds = [False] * table.cardinality
             inds = np.array(inds)
             is_nan = pd.isnull(c.data)
             if np.any(is_nan):
+                v = np.array(v).astype(c.data.dtype)
+                # print(type(v))
+                # print(v)
                 inds[~is_nan] = OPS[o](c.data[~is_nan], v)
             else:
+                v = np.array(v).astype(c.data.dtype)
                 inds = OPS[o](c.data, v)
         else:
+            v = np.array(v).astype(c.data.dtype)
             inds = OPS[o](c.data, v)
+
+        
+    
+        # print(v)
+        # print(v.dtype)
+        # print(c.name)
+        # print(c.data.dtype)
+        # print(c.data)
+        # print(o)
 
         if bools is None:
             bools = inds
@@ -110,6 +125,8 @@ def relation_generation(sample_frame_dict, join_name_set):
     initial_title_rows_str = [
         ','.join([str(item) for item in row]) for row in initial_title_rows]
     for name in join_name_set:
+        print(sample_frame_dict[name].dtypes)
+    for name in join_name_set:
         if name == 'title':
             continue
 
@@ -121,6 +138,10 @@ def relation_generation(sample_frame_dict, join_name_set):
         relation_col = list(set(all_col).difference(title_cols))
         print("columns of the join relation: {}".format(relation_col))
         view_title_rows = list(view_frame.groupby(title_cols).groups)
+        for row in view_title_rows:
+            if len(str(row[0])) == 1:
+                print(name)
+                print(row)
         view_title_rows_str = [
             ','.join([str(item) for item in row]) for row in view_title_rows]
         row_difference = set(view_title_rows_str).difference(
@@ -197,7 +218,7 @@ def relation_generation(sample_frame_dict, join_name_set):
         view_frame = view_frame.applymap(lambda x: np.nan if x == -1 else x)
 
         view_frame.to_csv(
-            './generated_tables_100/{}.csv'.format(fk_table_name), columns=saved_cols, index=False)
+            './generated_tables_60/{}.csv'.format(fk_table_name), columns=saved_cols, index=False)
         print("Saved {} into csv.".format(fk_table_name))
 
     # undo fillna operation for title frame
@@ -205,5 +226,5 @@ def relation_generation(sample_frame_dict, join_name_set):
 
     print(title_frame.head())
 
-    title_frame.to_csv('./generated_tables_100/title.csv', index=False)
+    title_frame.to_csv('./generated_tables_60/title.csv', index=False)
     print("Saved title into csv.")

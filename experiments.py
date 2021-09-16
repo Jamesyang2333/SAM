@@ -725,8 +725,9 @@ TEST_CONFIGS['test-job-light-ranges'] = dict(
 TEST_CONFIGS['job-light-ranges-reload'] = dict(
     EXPERIMENT_CONFIGS['job-light-ranges'],
     **{
-        'queries_csv': './queries/job-light-range-train.csv',
-        'checkpoint_to_load': 'models/job-light-ranges-pretrained.pt',
+        'queries_csv': '../queries/mscn_queries_neurocard_format.csv',
+        # 'checkpoint_to_load': '/home_nfs/jingyi/db_generation/db_gen/models/model-warmup0.15-27-cast_info-movie_companies-movie_info-movie_keyword-title-movie_info_idx-usesemi-10.h5',
+        'checkpoint_to_load': 'models/neurocard.pt',
         'eval_psamples': [1000, 8000],
         'subqueries_csv':None,
         # Evaluating on all queries takes a while.  Shorten the wait by
@@ -740,6 +741,7 @@ TEST_CONFIGS['job-light-ranges-reload'] = dict(
             'fact_psample_8000_median': 1.9,
             'fact_psample_8000_p99': 400,
         },
+        'folder_name': 'db_generation_neurocard'
     })
 
 #  estimating for postgreSQL

@@ -89,7 +89,7 @@ class JoinOrderBenchmark(object):
             # 4
             'company_type': ['kind'],
             # 2
-            'movie_companies': ['company_type_id'],
+            'movie_companies': ['company_type_id', 'company_id'],
             # Dom size 134K.
             'movie_keyword': ['keyword_id'],
             # 7
@@ -97,7 +97,7 @@ class JoinOrderBenchmark(object):
             # 5
             'movie_info_idx': ['info_type_id'],
             # 11
-            'cast_info': ['role_id'],
+            'cast_info': ['role_id', 'person_id'],
             # 71
             'movie_info': ['info_type_id'],
         })
@@ -168,6 +168,7 @@ class JoinOrderBenchmark(object):
             # Column(kind_id, distribution_size=7), Column(production_year,
             # distribution_size=133),
             'title.csv': ['id', 'kind_id', 'production_year'],
+            # 'cast_info.csv': ['movie_id', 'role_id'],
             'cast_info.csv': ['movie_id', 'role_id'],
             # Column(keyword_id, distribution_size=134170)
             'movie_keyword.csv': ['movie_id', 'keyword_id'],

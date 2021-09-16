@@ -7,8 +7,12 @@ import pandas as pd
 import common
 
 
-def LoadDmv(filename='Vehicle__Snowmobile__and_Boat_Registrations.csv'):
-    csv_file = '../datasets/{}'.format(filename)
+def LoadDmv(filename_or_df='../../../datasets/Vehicle__Snowmobile__and_Boat_Registrations.csv'):
+    if isinstance(filename_or_df, str):
+        # filename_or_df = '../../../datasets/{}'.format(filename_or_df)
+        pass
+    else:
+        assert (isinstance(filename_or_df, pd.DataFrame))
     cols = [
         'Record Type', 'Registration Class', 'State', 'County', 'Body Type',
         'Fuel Type', 'Reg Valid Date', 'Color', 'Scofflaw Indicator',
@@ -18,7 +22,7 @@ def LoadDmv(filename='Vehicle__Snowmobile__and_Boat_Registrations.csv'):
     # don't need to specify a type-cast for those because the desired order
     # there is the same as the default str-ordering (lexicographical).
     type_casts = {'Reg Valid Date': np.datetime64}
-    return common.CsvTable('DMV', csv_file, cols, type_casts)
+    return common.CsvTable('DMV', filename_or_df, cols, type_casts)
 
 def LoadCovtype(filename='covtype.csv'):
     csv_file = '../datasets/{}'.format(filename)

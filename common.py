@@ -312,6 +312,8 @@ class CsvTable(Table):
     def _load(self, filename, cols, **kwargs):
         print('Loading csv...', end=' ')
         s = time.time()
+        print(filename)
+        print(cols)
         df = pd.read_csv(filename, usecols=cols, **kwargs)
         if cols is not None:
             # Use [cols] here anyway to reorder columns by 'cols'.
