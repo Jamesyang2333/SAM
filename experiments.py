@@ -740,7 +740,7 @@ TEST_CONFIGS['job-light-ranges-reload'] = dict(
             'fact_psample_8000_median': 1.9,
             'fact_psample_8000_p99': 400,
         },
-        'folder_name': 'db_generation_neurocard'
+        'folder_name': 'db_generation'
     })
 
 #  estimating for postgreSQL

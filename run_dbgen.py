@@ -1593,7 +1593,7 @@ class NeuroCard(tune.Trainable):
                     
                     print("number of unrejected samples: {}".format(unrej))
 
-                    folder_name = self.folder_name + '_fanout'
+                    folder_name = self.folder_name
                     print("saving generated tables...")
                     res_file = open('./{}/title_{}.csv'.format(folder_name, str(iter_num)), 'w', encoding="utf8")
                     res_file.write('id,production_year,kind_id\n')
