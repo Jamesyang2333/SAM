@@ -392,7 +392,7 @@ def LoadImdbJobM(table=None,
     return tables
 
 def LoadImdb(table=None,
-             data_dir='../datasets/job/',
+             data_dir='./datasets/job/',
              try_load_parsed=True,
              use_cols='simple'):
     """Loads IMDB tables with a specified set of columns.
