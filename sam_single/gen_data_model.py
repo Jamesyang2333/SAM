@@ -332,7 +332,7 @@ def Main():
 
     selected_ckpts = all_ckpts
 
-    file_str = '../queries/{}workload_with_card_21000.txt'.format(args.dataset)
+    file_str = '../queries/{}_21000.txt'.format(args.dataset)
 
 
     with open(file_str, 'r', encoding="utf8") as f:
