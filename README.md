@@ -1,3 +1,3 @@
-# DB_GEN
-source code for db generation with supervised deep autoregressive models
+# SAM
+source code for SAM: Database Generation from Query Workload with Supervised Autoregressive Model
 
