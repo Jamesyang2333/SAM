@@ -673,11 +673,15 @@ TEST_CONFIGS['data-generation-job-light-MSCN-worklod'] = dict(
     EXPERIMENT_CONFIGS['job-light-ranges'],
     **{
         'queries_csv': 'queries/mscn_400.csv',
+        # Trained model of joint data distribution
         'checkpoint_to_load': 'models/uaeq-mscn-400.pt',
         'eval_psamples': [1000, 8000],
         'subqueries_csv':None,
+        # Location to store the generated database
         'folder_name': 'generated_database/imdb',
+        # Name of pk table
         'pk_table': 'title',
+        # Schema of generated database
         # put the pk/fk column in the first entry for each table
         'generation_cols': {
                                 'movie_info_idx.csv': ['movie_id', 'info_type_id'],
@@ -687,7 +691,9 @@ TEST_CONFIGS['data-generation-job-light-MSCN-worklod'] = dict(
                                 'movie_keyword.csv': ['movie_id', 'keyword_id'],
                                 'movie_info.csv': ['movie_id','info_type_id',]
                             }  ,
+        # Total number of iterations to run for the generation process
         'total_iterations': 100,
+        # Frequency to save generated database
         'save_frequency': 100,
     })
 
