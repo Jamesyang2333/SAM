@@ -7,9 +7,9 @@ bash scripts/download_imdb.sh
 ```
 **Pretrained Models** We have provided two pretrained model for IMDB dataset (Job-light-ranges schema). 
 
-[`./models/uaeq-mscn.pt`](./models/uaeq-mscn.pt): Trained from the full [MSCN](https://github.com/andreaskipf/learnedcardinalities) dataset ([`./queries/mscn_full.csv`](./queries/mscn_full.csv))
+[`./models/uaeq-mscn.pt`](./models/uaeq-mscn.pt): Trained from the full [MSCN](https://github.com/andreaskipf/learnedcardinalities) wirld ([`./queries/mscn_full.csv`](./queries/mscn_full.csv)).
 
-[`./models/uaeq-mscn-400.pt`](./models/uaeq-mscn.pt): Trained from 400 queries in dataset ([`./queries/mscn_400.csv`](./queries/mscn_400.csv))
+[`./models/uaeq-mscn-400.pt`](./models/uaeq-mscn.pt): Trained from the first 400 queries in the MSCN workload ([`./queries/mscn_400.csv`](./queries/mscn_400.csv)).
 
 **Generation from pretrained model** To generate database from pretrained models using SAM, use the following commands.
 ```
