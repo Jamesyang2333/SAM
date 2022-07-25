@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils import data
 import wandb
+import multiprocessing as mp
 
 import common
 import datasets
@@ -30,11 +31,10 @@ import made
 import train_utils
 import transformer
 import utils
-import multiprocessing as mp
 
 os.environ['RAY_DEBUG_DISABLE_MEMORY_MONITOR']= '0.999'
 parser = argparse.ArgumentParser()
-os.environ["CUDA_VISIBLE_DEVICES"]= "0,4"
+# os.environ["CUDA_VISIBLE_DEVICES"]= "0,4"
 parser.add_argument('--run',
                     nargs='+',
                     default=experiments.TEST_CONFIGS.keys(),
@@ -78,12 +78,6 @@ def TotalGradNorm(parameters, norm_type=2):
     return total_norm
 
 def get_qerror(est_card, card):
-    # if card == 0 and est_card != 0:
-    #     return est_card
-    # if card != 0 and est_card == 0:
-    #     return card
-    # if card == 0 and est_card == 0:
-    #     return 1.0
     if est_card > card:
         if card > 0:
             return est_card / card
@@ -94,275 +88,6 @@ def get_qerror(est_card, card):
             return card / est_card
         else:
             return card
-
-def run_epoch(split,
-              model,
-              opt,
-              train_data,
-              val_data=None,
-              batch_size=100,
-              upto=None,
-              epoch_num=None,
-              epochs=1,
-              verbose=False,
-              log_every=10,
-              return_losses=False,
-              table_bits=None,
-              warmups=1000,
-              loader=None,
-              constant_lr=None,
-              use_meters=True,
-              summary_writer=None,
-              lr_scheduler=None,
-              custom_lr_lambda=None,
-              label_smoothing=0.0,
-              semi_train=False,
-              estimator=None,
-              query_list=None,
-              card_list=None,
-              q_weight=0):
-    torch.set_grad_enabled(split == 'train')
-    model.train() if split == 'train' else model.eval()
-    dataset = train_data if split == 'train' else val_data
-    losses = []
-
-    torch.autograd.set_detect_anomaly(True)
-    if loader is None:
-        loader = data.DataLoader(dataset,
-                                 batch_size=batch_size,
-                                 shuffle=(split == 'train'))
-
-    # How many orderings to run for the same batch?
-    nsamples = 1
-    if hasattr(model, 'orderings'):
-        nsamples = len(model.orderings)
-        if verbose:
-            print('setting nsamples to', nsamples)
-
-    dur_meter = train_utils.AverageMeter(
-        'dur', lambda v: '{:.0f}s'.format(v), display_average=False)
-    lr_meter = train_utils.AverageMeter('lr', ':.5f', display_average=False)
-    tups_meter = train_utils.AverageMeter('tups',
-                                          utils.HumanFormat,
-                                          display_average=False)
-    loss_meter = train_utils.AverageMeter('loss (bits/tup)', ':.2f')
-    train_throughput = train_utils.AverageMeter('tups/s',
-                                                utils.HumanFormat,
-                                                display_average=False)
-    batch_time = train_utils.AverageMeter('sgd_ms', ':3.1f')
-    data_time = train_utils.AverageMeter('data_ms', ':3.1f')
-    progress = train_utils.ProgressMeter(upto, [
-        batch_time,
-        data_time,
-        dur_meter,
-        lr_meter,
-        tups_meter,
-        train_throughput,
-        loss_meter,
-    ])
-
-    if semi_train and split == 'train':
-        q_bs = math.ceil(len(query_list) / upto)
-        q_bs = int(q_bs)
-
-        query_card_list = list(zip(query_list, card_list))
-
-        np.random.shuffle(query_card_list)
-
-    begin_time = t1 = time.time()
-    for step, xb in enumerate(loader):
-        data_time.update((time.time() - t1) * 1e3)
-
-        if split == 'train':
-            if isinstance(dataset, data.IterableDataset):
-                # Can't call len(loader).
-                global_steps = upto * epoch_num + step + 1
-            else:
-                global_steps = len(loader) * epoch_num + step + 1
-
-            if constant_lr:
-                lr = constant_lr
-                for param_group in opt.param_groups:
-                    param_group['lr'] = lr
-            elif custom_lr_lambda:
-                lr_scheduler = None
-                lr = custom_lr_lambda(global_steps)
-                for param_group in opt.param_groups:
-                    param_group['lr'] = lr
-            elif lr_scheduler is None:
-                t = warmups
-                if warmups < 1:  # A ratio.
-                    t = int(warmups * upto * epochs)
-
-                d_model = model.embed_size
-                lr = (d_model**-0.5) * min(
-                    (global_steps**-.5), global_steps * (t**-1.5))
-                for param_group in opt.param_groups:
-                    param_group['lr'] = lr
-            else:
-                # We'll call lr_scheduler.step() below.
-                lr = opt.param_groups[0]['lr']
-
-        if upto and step >= upto:
-            break
-
-        if isinstance(xb, list):
-            # This happens if using data.TensorDataset.
-            assert len(xb) == 1, xb
-            xb = xb[0]
-
-        xb = xb.float().to(train_utils.get_device(), non_blocking=True)
-
-        # Forward pass, potentially through several orderings.
-        xbhat = None
-        model_logits = []
-        num_orders_to_forward = 1
-        if split == 'test' and nsamples > 1:
-            # At test, we want to test the 'true' nll under all orderings.
-            num_orders_to_forward = nsamples
-
-        for i in range(num_orders_to_forward):
-            if hasattr(model, 'update_masks'):
-                # We want to update_masks even for first ever batch.
-                model.update_masks()
-
-            model_out = model(xb)
-            model_logits.append(model_out)
-            if xbhat is None:
-                xbhat = torch.zeros_like(model_out)
-            xbhat += model_out
-
-        if num_orders_to_forward == 1:
-            loss = model.nll(xbhat, xb, label_smoothing=label_smoothing).mean()
-        else:
-            # Average across orderings & then across minibatch.
-            #
-            #   p(x) = 1/N sum_i p_i(x)
-            #   log(p(x)) = log(1/N) + log(sum_i p_i(x))
-            #             = log(1/N) + logsumexp ( log p_i(x) )
-            #             = log(1/N) + logsumexp ( - nll_i (x) )
-            #
-            # Used only at test time.
-            logps = []  # [batch size, num orders]
-            assert len(model_logits) == num_orders_to_forward, len(model_logits)
-            for logits in model_logits:
-                # Note the minus.
-                logps.append(
-                    -model.nll(logits, xb, label_smoothing=label_smoothing))
-            logps = torch.stack(logps, dim=1)
-            logps = logps.logsumexp(dim=1) + torch.log(
-                torch.tensor(1.0 / nsamples, device=logps.device))
-            loss = (-logps).mean()
-        if semi_train and split == 'train':
-            if step * q_bs >= len(query_list):
-                q_c_tmp = query_card_list[step * q_bs - len(query_list): (step + 1) * q_bs - len(query_list)]
-            elif (step + 1) * q_bs > len(query_list):
-                q_c_tmp = query_card_list[step * q_bs:] + query_card_list[0: (step + 1) * q_bs - len(query_list)]
-            else:
-                q_c_tmp = query_card_list[step * q_bs: (step + 1) * q_bs]
-            train_queries = [q for q, c in q_c_tmp]
-            train_cards = [c for q, c in q_c_tmp]
-            train_cards = np.array(train_cards)
-            train_cards = torch.as_tensor(train_cards, dtype=torch.float32)
-            train_cards = train_cards.to(train_utils.get_device())
-
-            q_loss_array = []
-
-            for i, query in enumerate(train_queries):
-                cols, ops, vals = query
-                card = train_cards[i]
-                est_card = estimator.Query(cols, ops, vals)
-                q_loss_array.append(get_qerror(est_card, card))
-
-            q_loss = q_loss_array[0]
-            for i in range(len(q_loss_array)-1):
-                q_loss = q_loss + q_loss_array[i+1]
-
-            q_loss = q_loss / len(q_loss_array)
-
-
-            all_loss = loss + q_weight * q_loss
-        else:
-            all_loss = loss
-
-        losses.append(loss.detach().item())
-        if split == 'train':
-            opt.zero_grad()
-            if semi_train:
-                all_loss.backward(retain_graph=True)
-                #all_loss.backward()
-            else:
-                all_loss.backward()
-            l2_grad_norm = TotalGradNorm(model.parameters())
-
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1, norm_type=2)
-            opt.step()
-            if lr_scheduler is not None:
-                lr_scheduler.step()
-
-            loss_bits = loss.item() / np.log(2)
-
-            # Number of tuples processed in this epoch so far.
-            ntuples = (step + 1) * batch_size
-            if use_meters:
-                dur = time.time() - begin_time
-                lr_meter.update(lr)
-                tups_meter.update(ntuples)
-                loss_meter.update(loss_bits)
-                dur_meter.update(dur)
-                train_throughput.update(ntuples / dur)
-
-            if summary_writer is not None:
-                # wandb.log({
-                #     'train/lr': lr,
-                #     'train/tups': ntuples,
-                #     'train/tups_per_sec': ntuples / dur,
-                #     'train/nll': loss_bits,
-                #     'train/global_step': global_steps,
-                #     'train/l2_grad_norm': l2_grad_norm,
-                # })
-                summary_writer.add_scalar('train/lr',
-                                          lr,
-                                          global_step=global_steps)
-                summary_writer.add_scalar('train/tups',
-                                          ntuples,
-                                          global_step=global_steps)
-                summary_writer.add_scalar('train/tups_per_sec',
-                                          ntuples / dur,
-                                          global_step=global_steps)
-                summary_writer.add_scalar('train/nll',
-                                          loss_bits,
-                                          global_step=global_steps)
-
-            if step % log_every == 0:
-                if table_bits:
-                    print(
-                        'Epoch {} Iter {}, {} entropy gap {:.4f} bits (loss {:.3f}, data {:.3f}) {:.5f} lr, {} tuples seen ({} tup/s)'
-                        .format(
-                            epoch_num, step, split,
-                            loss.item() / np.log(2) - table_bits,
-                            loss.item() / np.log(2), table_bits, lr,
-                            utils.HumanFormat(ntuples),
-                            utils.HumanFormat(ntuples /
-                                              (time.time() - begin_time))))
-                elif not use_meters:
-                    print(
-                        'Epoch {} Iter {}, {} loss {:.3f} bits/tuple, {:.5f} lr'
-                        .format(epoch_num, step, split,
-                                loss.item() / np.log(2), lr))
-
-        if verbose:
-            print('%s epoch average loss: %f' % (split, np.mean(losses)))
-
-        batch_time.update((time.time() - t1) * 1e3)
-        t1 = time.time()
-        if split == 'train' and step % log_every == 0 and use_meters:
-            progress.display(step)
-
-    if return_losses:
-        return losses
-    return np.mean(losses)
-
 
 def MakeMade(
         table,
@@ -518,11 +243,11 @@ def MakeMade(
     return model
 
 
-class NeuroCard(tune.Trainable):
+class SAM(tune.Trainable):
 
     def _setup(self, config):
         self.config = config
-        print('NeuroCard config:')
+        print('SAM config:')
         pprint.pprint(config)
         os.chdir(config['cwd'])
         for k, v in config.items():
@@ -580,7 +305,7 @@ class NeuroCard(tune.Trainable):
                 self.loader = loader
 
                 table_primary_index = [t.name for t in loaded_tables
-                                      ].index('title')
+                                      ].index(self.pk_table)
 
                 table.cardinality = datasets.JoinOrderBenchmark.GetFullOuterCardinalityOrFail(
                     self.join_tables)
@@ -608,10 +333,11 @@ class NeuroCard(tune.Trainable):
                                self.train_data,
                                table_primary_index=table_primary_index)
 
-        self.content_dics, self.indicator_dics, self.fanout_dics = self.MakeIndexRecords(self.table,
+        # set the columns to generate
+        self.content_cols, self.indicator_cols, self.fanout_cols = self.MakeIndexRecords(self.table,
                                                                           self.train_data,
                                                                           table_primary_index=table_primary_index)
-        print (self.content_dics)
+        print (self.content_cols)
         # NOTE: ReportModel()'s returned value is the true model size in
         # megabytes containing all all *trainable* parameters.  As impl
         # convenience, the saved ckpts on disk have slightly bigger footprint
@@ -708,11 +434,10 @@ class NeuroCard(tune.Trainable):
         for i in range(len(self.join_tables)-1):
             self.sampled_views.append({})
 
-        self.sampled_table_idx = table_primary_index
+        self.pk_table_id = table_primary_index
         self.sampled_view_idx = []
 
         self.sampled_full_view = {}
-        self.sampled_full_view_fanout = {}
         self.total_tuple_sampled = 0
         self.sampled_group_dict = {}
 
@@ -805,37 +530,6 @@ class NeuroCard(tune.Trainable):
                                  pin_memory=True)
         return join_spec, join_iter_dataset, loader, table
 
-    # def MakeOrdering(self, columns):
-    #     fixed_ordering = None
-    #     if self.dataset != 'imdb' and self.special_orders <= 1:
-    #         fixed_ordering = list(range(len(columns)))
-    #         return fixed_ordering
-    #
-    #     if self.order is not None:
-    #         print('Using passed-in order:', self.order)
-    #         fixed_ordering = self.order
-    #         return fixed_ordering
-    #
-    #     cols = [c for c in columns if not c.name.startswith('__')]
-    #     inds_cols = [c for c in columns if c.name.startswith('__in_')]
-    #     num_indicators = len(inds_cols)
-    #     num_content, num_virtual = len(cols), len(columns) - len(cols)
-    #
-    #     # Data: { content }, { indicators }, { fanouts }.
-    #
-    #     content = np.arange(num_content)
-    #     inds = np.arange(num_content, num_content + num_indicators)
-    #     fanouts = np.arange(num_content + num_indicators, len(columns))
-    #
-    #     if order_indicators_at_front:
-    #         # Model: { indicators }, { content }, { fanouts },
-    #         order = np.concatenate(
-    #             (inds, content, fanouts)).reshape(-1, )
-    #
-    #     assert len(np.unique(order)) == len(cols_to_train), order
-    #     orders.append(order)
-    #     return fixed_ordering
-
     def MakeOrdering(self, table):
         fixed_ordering = None
         if self.dataset != 'imdb' and self.special_orders <= 1:
@@ -855,19 +549,23 @@ class NeuroCard(tune.Trainable):
         return fixed_ordering
 
     def MakeIndexRecords(self, table, train_data, table_primary_index=None):
+        """
+        Extract the index of each table's columns in the AR model
+        """
         cols_to_train = table.columns
         if self.factorize:
             cols_to_train = train_data.columns
 
         num_tables = len(self.join_tables)
 
-        fanout_dics = []
+        fanout_cols = []
         for i in range (num_tables):
-            fanout_dics.append([])
-        indicator_dics = [None] * num_tables
-        content_dics = []
+            fanout_cols.append([])
+        indicator_cols = [None] * num_tables
+        
+        content_cols = []
         for i in range (num_tables):
-            content_dics.append([])
+            content_cols.append({})
 
         table_num_columns = table_column_types = table_indexes = None
         if isinstance(train_data, (common.SamplerBasedIterDataset,
@@ -875,44 +573,42 @@ class NeuroCard(tune.Trainable):
             table_num_columns = train_data.table_num_columns
             table_column_types = train_data.combined_columns_types
             table_indexes = train_data.table_indexes
-            print('table_num_columns', table_num_columns)
-            print('table_column_types', table_column_types)
-            print('table_indexes', table_indexes)
-            print('table_primary_index', table_primary_index)
+            print('table_num_columns:', table_num_columns)
+            print('table_column_types:', table_column_types)
+            print('table_indexes:', table_indexes)
+            print('table_primary_index:', table_primary_index)
 
-            print(cols_to_train)
-            print(len(cols_to_train))
+            print('number of columns in AR model:', len(cols_to_train))
             for col_id, col in enumerate(cols_to_train):
                 col_type = table_column_types[col_id]
                 table_id = int(table_indexes[col_id])
 
                 table_name = self.join_tables[table_id]
                 table_key = table_name + '.csv'
-                cols_candidate = datasets.JoinOrderBenchmark.BASE_TABLE_PRED_COLS[table_key]
+                cols_candidate = self.generation_cols[table_key]
 
                 if col_type == common.TYPE_NORMAL_ATTR:
-                    if table_id == 4 and col.name.split(':')[-1] in ['kind_id', 'production_year']:
-                        content_dics[table_id].append(col_id)
-                    elif table_id == 0 and col.name.split(':')[-1] in ['role_id', 'person_id_fact_0', 'person_id_fact_1']:
-                        content_dics[table_id].append(col_id)
-                    elif table_id == 1 and col.name.split(':')[-1] in ['company_id_fact_0', 'company_id_fact_1', 'company_type_id']:
-                        content_dics[table_id].append(col_id)
-                    elif table_id == 2 and col.name.split(':')[-1] == 'info_type_id':
-                        content_dics[table_id].append(col_id)
-                    elif table_id == 3 and col.name.split(':')[-1] in ['keyword_id_fact_0', 'keyword_id_fact_1']:
-                        content_dics[table_id].append(col_id)
-                    elif table_id == 5 and col.name.split(':')[-1] == 'info_type_id':
-                        content_dics[table_id].append(col_id)
+                    col_name = col.name.split(':')[-1]
+                    # print(col_name)
+                    if col_name[-6:-2] == "fact":
+                        # print(col_name)
+                        if col_name[:-7] in cols_candidate:
+                            if col_name[:-7] in content_cols[table_id]:
+                                content_cols[table_id][col_name[:-7]].append(col_id)
+                            else:
+                                content_cols[table_id][col_name[:-7]] = [col_id]
+                    elif col_name in cols_candidate:
+                        if col_name in content_cols[table_id]:
+                            content_cols[table_id][col_name].append(col_id)
+                        else:
+                            content_cols[table_id][col_name] = [col_id]
+
                 elif col_type == common.TYPE_INDICATOR:
-                    indicator_dics[table_id] = col_id
+                    indicator_cols[table_id] = col_id
                 else:
-                    fanout_dics[table_id].append(col_id)
+                    fanout_cols[table_id].append(col_id)
 
-            # print("printing all table fanout columns: ")
-            # for table_id in range(num_tables):
-            #     print("table id: {}, fanout columns: {}".format(table_id, fanout_dics[table_id]))
-
-        return content_dics, indicator_dics, fanout_dics
+        return content_cols, indicator_cols, fanout_cols
 
     def ComputeCE(self, gt_table, gen_table, gt_caches, eps=1e-9):
         col_names = gt_table.columns.tolist()
@@ -950,10 +646,9 @@ class NeuroCard(tune.Trainable):
 
         return ce
 
-    def AR_ComputeCE(self, gt_table, gen_table_dics, gen_total_num, gt_caches, eps=1e-9):
-        col_names = ['production_year', 'kind_id']
+    def AR_ComputeCE(self, col_names, gt_table, gen_table_dics, gen_total_num, gt_caches, eps=1e-9):
         gt_table = gt_table.fillna(-1)
-        print ('start group by')
+        # print ('start group by')
         if self.unique_rows is None:
             self.unique_rows = list(gt_table.groupby(col_names).groups)
         ce = 0.
@@ -978,10 +673,6 @@ class NeuroCard(tune.Trainable):
 
                 gt_caches[value_str] = gt_prob
 
-            # value_id_format = []
-            # for i, col_value in enumerate(value):
-            #     value_id_format.append(look_up_list[i][col_value])
-            # value_id_format = ','.join(value_id_format)
             if value_str in gen_table_dics:
                 gen_prob = gen_table_dics[value_str] / gen_total_num
             else:
@@ -1133,72 +824,44 @@ class NeuroCard(tune.Trainable):
                     train_virtual_cols=train_virtual_cols)
         return res
 
-    def ProcessSampled(self, sampled, look_up_list_dict):
+    def ProcessSampled(self, sampled):
         sampled = sampled.cpu().numpy()
 
         fk_table_idx = list(range(len(self.join_tables)))
-        fk_table_idx.remove(self.sampled_table_idx)
-        indicator_idx = [self.indicator_dics[i] for i in range(len(self.join_tables))]
+        fk_table_idx.remove(self.pk_table_id)
+        indicator_idx = [self.indicator_cols[i] for i in range(len(self.join_tables))]
 
         indicator_count = 0
         for sample in sampled:
 
+            # check if the sampled value for factorized column is invalid
             invalid_sample = False
+
             for view_id in range(len(fk_table_idx)):
                 joined_table_id = fk_table_idx[view_id]
 
-                look_up_list = look_up_list_dict[view_id]
+                # reconstruct column values from factorized columns
 
-                sampled_idxs = [int(float(sample[content_id])) for content_id in self.content_dics[joined_table_id]]
-                # insert placeholder value for pk table sample
-                sampled_idxs.insert(0, 0)
-                sampled_idxs.insert(0, 0)
-                if view_id == 0 or view_id == 1:
-                    col_id_fact_0 = self.content_dics[view_id][1]
-                    col_id_fact_1 = self.content_dics[view_id][2]
+                for col_name in self.content_cols[joined_table_id]:
+                    # only check if the column is factorized
+                    col_ids = self.content_cols[joined_table_id][col_name]
+                    if len(col_ids) > 1:
+                        sampled_idx_value = 0
+                        for col_id in col_ids:
+                            current_idx_value = int(self.train_data.columns[col_id].all_distinct_values[int(float(sample[col_id]))]) \
+                                                << self.train_data.columns[col_id].bit_offset
+                            sampled_idx_value += current_idx_value
+                        
+                        original_size = self.loaded_tables[joined_table_id][col_name].distribution_size
+                        if sampled_idx_value >= original_size:
+                            invalid_sample = True
+                            break
 
-                    sampled_idx_fact_0 = int(
-                        self.train_data.columns[col_id_fact_0].all_distinct_values[int(float(sampled_idxs[3]))]) \
-                                        << self.train_data.columns[col_id_fact_0].bit_offset
-
-                    sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[
-                                                int(float(sampled_idxs[4]))]) \
-                                        << self.train_data.columns[col_id_fact_1].bit_offset
-
-                    sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
-
-                    if view_id == 0:
-                        original_size = self.loaded_tables[0]['person_id'].distribution_size
-                    else:
-                        original_size = self.loaded_tables[1]['company_id'].distribution_size
-
-                    if sampled_idx_final >= original_size:
-                        invalid_sample = True
-                        break
-
-                elif view_id == 3:
-                    col_id_fact_0 = self.content_dics[view_id][0]
-                    col_id_fact_1 = self.content_dics[view_id][1]
-
-                    sampled_idx_fact_0 = int(
-                        self.train_data.columns[col_id_fact_0].all_distinct_values[int(float(sampled_idxs[2]))]) \
-                                        << self.train_data.columns[col_id_fact_0].bit_offset
-
-                    sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[
-                                                int(float(sampled_idxs[3]))]) \
-                                        << self.train_data.columns[col_id_fact_1].bit_offset
-
-                    sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
-
-                    original_size = self.loaded_tables[3]['keyword_id'].distribution_size
-
-                    if sampled_idx_final >= original_size:
-                        invalid_sample = True
-                        break
-
+            # if the reconstructed value is out-of-range, discard the sample
             if invalid_sample:
                 continue
 
+            # only use samples where all indicator column values are one
             all_indicator = True
             for idx in indicator_idx:
                 if sample[idx] == 0:
@@ -1210,16 +873,16 @@ class NeuroCard(tune.Trainable):
             else:
                 continue
 
-            primary_id = self.sampled_table_idx
-            pri_indicator_id = self.indicator_dics[primary_id]
+            primary_id = self.pk_table_id
+            pri_indicator_id = self.indicator_cols[primary_id]
 
             if sample[pri_indicator_id] != 0:
                 # save sample from full outer join
                 weight = 1.
                 content = []
                 for i in fk_table_idx:
-                    if sample[self.indicator_dics[i]] != 0:
-                        fanout_id = self.fanout_dics[i][0]
+                    if sample[self.indicator_cols[i]] != 0:
+                        fanout_id = self.fanout_cols[i][0]
                         fanout = sample[fanout_id]
                         if fanout <= 1:
                             fanout = 1.
@@ -1228,53 +891,47 @@ class NeuroCard(tune.Trainable):
                             fanout = float(fanout - 1)
                             
                         weight = weight / fanout
+
+                content_col_ids = []
                 for table_id in range(len(self.join_tables)):
-                    for content_id in self.content_dics[table_id]:
-                        content.append(str(sample[content_id]))
+                    for col_name in self.content_cols[table_id]:
+                        content_col_ids += self.content_cols[table_id][col_name]    
+                
+                for col_id in content_col_ids:
+                    content.append(str(sample[col_id]))
                
                 for idx in indicator_idx:
                     content.append(str(sample[idx]))
 
+                pk_content_col_ids = []
+                for col_name in self.content_cols[self.pk_table_id]:
+                    pk_content_col_ids += self.content_cols[self.pk_table_id][col_name]   
+
                 content_group = []
-                for content_id in self.content_dics[self.sampled_table_idx]:
-                    content_group.append(str(sample[content_id]))
+                for col_id in pk_content_col_ids:
+                    content_group.append(str(sample[col_id])) 
 
                 content_str = ','.join(content)
                 content_with_fanout = content
                 for i in fk_table_idx:
-                    fanout_id = self.fanout_dics[i][0]
+                    fanout_id = self.fanout_cols[i][0]
                     content_with_fanout.append(str(sample[fanout_id]))
                     content_group.append(str(sample[fanout_id]))
 
                 content_with_fanout_str = ','.join(content_with_fanout)
 
-                if not (content_str in self.sampled_full_view):
-                    self.sampled_full_view[content_str] = {"sample": [sample]}
-                    self.sampled_full_view[content_str][self.sampled_table_idx] = weight
-                    for idx in fk_table_idx:
-                        if sample[self.indicator_dics[idx]] != 0:
-                            self.sampled_full_view[content_str][idx] = weight*sample[self.fanout_dics[idx][0]]
-                    
-                else:
-                    # self.sampled_full_view[content]["sample"].append(tuple)
-                    self.sampled_full_view[content_str][self.sampled_table_idx] += weight
-                    for idx in fk_table_idx:
-                        if sample[self.indicator_dics[idx]] != 0:
-                            self.sampled_full_view[content_str][idx] += (weight*sample[self.fanout_dics[idx][0]])
-
-                if not (content_with_fanout_str in self.sampled_full_view_fanout):
-                        self.sampled_full_view_fanout[content_with_fanout_str] = {"sample": [sample]}
-                        self.sampled_full_view_fanout[content_with_fanout_str][self.sampled_table_idx] = weight
+                if not (content_with_fanout_str in self.sampled_full_view):
+                        self.sampled_full_view[content_with_fanout_str] = {"sample": [sample]}
+                        self.sampled_full_view[content_with_fanout_str][self.pk_table_id] = weight
                         for idx in fk_table_idx:
-                            if sample[self.indicator_dics[idx]] != 0:
-                                self.sampled_full_view_fanout[content_with_fanout_str][idx] = weight*sample[self.fanout_dics[idx][0]]
+                            if sample[self.indicator_cols[idx]] != 0:
+                                self.sampled_full_view[content_with_fanout_str][idx] = weight*sample[self.fanout_cols[idx][0]]
                     
                 else:
-                    # self.sampled_full_view[content]["sample"].append(tuple)
-                    self.sampled_full_view_fanout[content_with_fanout_str][self.sampled_table_idx] += weight
+                    self.sampled_full_view[content_with_fanout_str][self.pk_table_id] += weight
                     for idx in fk_table_idx:
-                        if sample[self.indicator_dics[idx]] != 0:
-                            self.sampled_full_view_fanout[content_with_fanout_str][idx] += (weight*sample[self.fanout_dics[idx][0]])
+                        if sample[self.indicator_cols[idx]] != 0:
+                            self.sampled_full_view[content_with_fanout_str][idx] += (weight*sample[self.fanout_cols[idx][0]])
 
                 content_group_str = ','.join(content_group)
                 if not content_group_str in self.sampled_group_dict:
@@ -1282,10 +939,7 @@ class NeuroCard(tune.Trainable):
                 else:
                     self.sampled_group_dict[content_group_str].append(content_with_fanout_str)
 
-        # print("number of samples with all indicators: {}".format(indicator_count))
         self.total_tuple_sampled += indicator_count
-        # print("total number of samples obtained: {}".format(self.total_tuple_sampled))
-        # print("total number of pk+fanout groups: {}".format(len(self.sampled_group_dict)))
 
     def _simple_save(self):
         semi_str = 'usesemi' if self.semi_train else 'nosemi'
@@ -1299,7 +953,7 @@ class NeuroCard(tune.Trainable):
     def _train(self):
         final_time_start = time.time()
         fk_table_idx = list(range(len(self.join_tables)))
-        fk_table_idx.remove(self.sampled_table_idx)
+        fk_table_idx.remove(self.pk_table_id)
 
         if self.checkpoint_to_load or self.eval_join_sampling:
             model = self.model
@@ -1307,51 +961,25 @@ class NeuroCard(tune.Trainable):
             batch_size = 100000
             print("join cardinality: {}".format(self.table.cardinality))
 
-            pk_look_up_list = []
-            # generate title table
-            pk_look_up_list.append(self.loaded_tables[self.sampled_table_idx]['production_year'].all_distinct_values)
-            pk_look_up_list.append(self.loaded_tables[self.sampled_table_idx]['kind_id'].all_distinct_values)
+            # record distinct value of pk tables columns
+            look_up_list = []
+            for table_id in range(len(self.join_tables)):
+                column_values_dict = {}
+                for col_name in self.content_cols[table_id]:
+                    column_values_dict[col_name]=(self.loaded_tables[table_id][col_name].all_distinct_values)
+                look_up_list.append(column_values_dict)
 
-            look_up_list_dict = {}
-            for view_id in range(len(fk_table_idx)):
-                if view_id == 0:
-                    look_up_list_dict[view_id] = []
-                    look_up_list_dict[view_id].append(self.loaded_tables[0]['role_id'].all_distinct_values)
-                    look_up_list_dict[view_id].append(self.loaded_tables[0]['person_id'].all_distinct_values)
-                elif view_id == 1:
-                    look_up_list_dict[view_id] = []
-                    look_up_list_dict[view_id].append(self.loaded_tables[1]['company_type_id'].all_distinct_values)
-                    look_up_list_dict[view_id].append(self.loaded_tables[1]['company_id'].all_distinct_values)
-                elif view_id == 2:
-                    look_up_list_dict[view_id] = []
-                    look_up_list_dict[view_id].append(self.loaded_tables[2]['info_type_id'].all_distinct_values)
-                elif view_id == 3:
-                    look_up_list_dict[view_id] = []
-                    look_up_list_dict[view_id].append(self.loaded_tables[3]['keyword_id'].all_distinct_values)
-                elif view_id == 4:
-                    look_up_list_dict[view_id] = []
-                    look_up_list_dict[view_id].append(self.loaded_tables[5]['info_type_id'].all_distinct_values)
-
-            for iter_num in range(2001):
+            for iter_num in range(self.total_iterations + 1):
                 
                 self.sampled_table_nums = [0] * len(self.join_tables)
-                # begin_time = t1 = time.time()
                 sampled = model.sample(num=batch_size, device=train_utils.get_device())
-                # dur = time.time()-t1
-                # print("sample time {}ms".format(dur * 1000))
 
-                # t1 = time.time()
-                self.ProcessSampled(sampled, look_up_list_dict)
-                # dur = time.time() - t1
-                # print("process time {}ms".format(dur * 1000))
+                self.ProcessSampled(sampled)
 
-                if iter_num % 100 == 0:
+                if iter_num % self.save_frequency == 0:
                     print("iter_num = {}".format(iter_num+1))
-                    ####### assign key to all tables ######
-                    title_num = 0
-                    total_weight = 0
-                    for val in self.sampled_full_view:
-                        total_weight += self.sampled_full_view[val][self.sampled_table_idx]
+
+                    pk_total_weight = 0
 
                     table_weight_sum = {}
                     for i in range(len(self.join_tables)):
@@ -1364,295 +992,209 @@ class NeuroCard(tune.Trainable):
                     scale_values = {}
                     for i in range(len(self.join_tables)):
                         scale_values[i] = self.loaded_tables[i].cardinality / table_weight_sum[i]
-                    print("scale value: {}".format(scale_values))
                     print("table weight sum: {}".format(table_weight_sum))
-
-                    actual_scale = self.table.cardinality / (batch_size*(iter_num+1))
-                    print("theoretical scale value: {}".format(actual_scale))
-                    for i in range(len(self.join_tables)):
-                        print("number of tuple generated for {}: {}".format(self.join_tables[i], round(actual_scale*table_weight_sum[i])))
+                    print("scale value: {}".format(scale_values))
                     
-                    print("number of distinct groups: {}".format(len(self.sampled_full_view)))
-                    print("number of distinct groups with fanout: {}".format(len(self.sampled_full_view_fanout)))
+                    print("number of groups: {}".format(len(self.sampled_full_view)))
 
-                    counter = 0
-                    generated_counter_group = 0
+                    # Group-and-Merge algorithm
+                    pk_count = 0
+                    generated_group_count = 0
                     sampled_fanout_group_pk = {}
                     for group_val in self.sampled_group_dict:
                         self.sampled_group_dict[group_val].sort()
+
+                        # Calculate sum of pk relation weight of the group
                         pk_sum = 0
                         for val in self.sampled_group_dict[group_val]:
-                            pk_sum += self.sampled_full_view_fanout[val][self.sampled_table_idx] * scale_values[self.sampled_table_idx]
+                            pk_sum += self.sampled_full_view[val][self.pk_table_id] * scale_values[self.pk_table_id]
                     
+                        # Generate pk from the group if the sum of pk relation weight is greater then 0.5
                         if pk_sum > 0.5:
-                            generated_counter_group += 1
+                            generated_group_count += 1
                             current_idx = 0
-                            group_counter = 0
-                            current_group = []
+                            tuple_count = 0
+                            current_set = []
                             for val in self.sampled_group_dict[group_val]:
-                                group_counter += self.sampled_full_view_fanout[val][self.sampled_table_idx] * scale_values[self.sampled_table_idx]
-                                current_group.append(val)
-                                if int(group_counter) != current_idx:
-                                    new_idx_list = list(range(current_idx+counter, int(group_counter)+counter))
+                                tuple_count += self.sampled_full_view[val][self.pk_table_id] * scale_values[self.pk_table_id]
+                                current_set.append(val)
+                                if int(tuple_count) != current_idx:
+                                    new_idx_list = list(range(current_idx+pk_count, int(tuple_count)+pk_count))
                                     new_idx_list_str = ','.join([str(item) for item in new_idx_list])
-                                    sampled_fanout_group_pk[new_idx_list_str] = current_group
-                                    current_group = []
-                                    current_idx = int(group_counter)
+                                    sampled_fanout_group_pk[new_idx_list_str] = current_set
+                                    current_set = []
+                                    current_idx = int(tuple_count)
                             
-                            if current_group:
-                                new_idx_list = list(range(current_idx+counter, current_idx+counter+1))
+                            if current_set:
+                                new_idx_list = list(range(current_idx+pk_count, current_idx+pk_count+1))
                                 new_idx_list_str = ','.join([str(item) for item in new_idx_list])
-                                sampled_fanout_group_pk[new_idx_list_str] = current_group
+                                sampled_fanout_group_pk[new_idx_list_str] = current_set
                                 current_idx += 1
 
 
                             num_pk = current_idx
-                            counter = counter + num_pk
+                            pk_count = pk_count + num_pk
 
-                    print("number of pk assigned group by fanout: {}".format(counter))
-                    print("count number of group with title tuple generated group by fanout: {}".format(generated_counter_group))
+                    print("number of pk assigned: {}".format(pk_count))
+                    print("number of groups with pk assigned: {}".format(generated_group_count))
 
-                    print("generating title table combine by fanout...")
-                    sampled_table = {}
+                    print("Generating pk table...")
+                    generated_pk_table = {}
                     for pk_str in sampled_fanout_group_pk:
                         val = sampled_fanout_group_pk[pk_str][0]
                         pk_list = pk_str.split(',')
-                        current_val = self.sampled_full_view_fanout[val]
+                        current_val = self.sampled_full_view[val]
 
                         value_str = []
-                        for i in range(2):
-                            sampled_idx = int(float(current_val['sample'][0][self.content_dics[self.sampled_table_idx][i]]))
-                            sampled_value = pk_look_up_list[i][sampled_idx]
+
+                        for col_name in self.content_cols[self.pk_table_id]:
+                            # only check if the column is factorized
+                            col_ids = self.content_cols[self.pk_table_id][col_name]
+                            if len(col_ids) > 1:
+                                sampled_idx_value = 0
+                                for col_id in col_ids:
+                                    current_idx_value = int(self.train_data.columns[col_id].all_distinct_values[int(float(current_val['sample'][0][col_id]))]) \
+                                                        << self.train_data.columns[col_id].bit_offset
+                                    sampled_idx_value += current_idx_value
+                            else:
+                                sampled_idx_value = int(float(current_val['sample'][0][col_ids[0]]))
+                            
+                            sampled_value = look_up_list[self.pk_table_id][col_name][sampled_idx_value]
                             if np.isnan(sampled_value):
                                 value_str.append('')
                             else:
                                 value_str.append(str(sampled_value))
                     
                         value_str = ','.join(value_str)
-                        if not (value_str in sampled_table):
-                            sampled_table[value_str] = pk_list
+                        if not (value_str in generated_pk_table):
+                            generated_pk_table[value_str] = pk_list
                         else: 
-                            sampled_table[value_str] += pk_list
+                            generated_pk_table[value_str] += pk_list
 
 
-                    print("generating fk tables combined by fanout...")
-                    # generate fk table
-                    # count = 0
-                    sampled_fk_tables = {}
-                    for view_id in range(len(fk_table_idx)):
-                            joined_table_id = fk_table_idx[view_id]
-                            sampled_fk_tables[joined_table_id] = {}
+                    print("Generating fk tables...")
+                    generated_fk_tables = {}
+                    for table_id in fk_table_idx:
+                        generated_fk_tables[table_id] = {}
 
-                    unrej = [0 for i in range(len(fk_table_idx))]
                     for pk_str in sampled_fanout_group_pk:
                         val = sampled_fanout_group_pk[pk_str][0]
                         pk_list = pk_str.split(',')
                 
                         weight_dict = {}
-                        for view_id in range(len(fk_table_idx)):
-                            weight_dict[view_id] = {}
+                        for table_id in fk_table_idx:
+                            weight_dict[table_id] = {}
 
                         for val in sampled_fanout_group_pk[pk_str]:
-                            current_val = self.sampled_full_view_fanout[val]
-                            # if count % 5000 == 0:
-                            #     print("processed {} vals".format(count))
-                            # count += 1
+                            current_val = self.sampled_full_view[val]
 
-                            for view_id in range(len(fk_table_idx)):
-                                joined_table_id = fk_table_idx[view_id]
-                                if not (joined_table_id in current_val):
+                            for table_id in fk_table_idx:
+                                if not (table_id in current_val):
                                     continue
 
-                                look_up_list = look_up_list_dict[view_id]
-
-                                sampled_idxs = [int(float(current_val['sample'][0][content_id])) for content_id in self.content_dics[joined_table_id]]
-                                # insert placeholder value for pk table sample
-                                sampled_idxs.insert(0, 0)
-                                sampled_idxs.insert(0, 0)
-                                if view_id == 0 or view_id == 1:
-                                    col_id_fact_0 = self.content_dics[view_id][1]
-                                    col_id_fact_1 = self.content_dics[view_id][2]
-
-                                    sampled_idx_fact_0 = int(
-                                        self.train_data.columns[col_id_fact_0].all_distinct_values[int(float(sampled_idxs[3]))]) \
-                                                        << self.train_data.columns[col_id_fact_0].bit_offset
-
-                                    sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[
-                                                                int(float(sampled_idxs[4]))]) \
-                                                        << self.train_data.columns[col_id_fact_1].bit_offset
-
-                                    sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
-
-                                    if view_id == 0:
-                                        original_size = self.loaded_tables[0]['person_id'].distribution_size
-                                    else:
-                                        original_size = self.loaded_tables[1]['company_id'].distribution_size
-
-                                    if sampled_idx_final >= original_size:
-                                        exit
-                                        continue
-
-                                elif view_id == 3:
-                                    col_id_fact_0 = self.content_dics[view_id][0]
-                                    col_id_fact_1 = self.content_dics[view_id][1]
-
-                                    sampled_idx_fact_0 = int(
-                                        self.train_data.columns[col_id_fact_0].all_distinct_values[int(float(sampled_idxs[2]))]) \
-                                                        << self.train_data.columns[col_id_fact_0].bit_offset
-
-                                    sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[
-                                                                int(float(sampled_idxs[3]))]) \
-                                                        << self.train_data.columns[col_id_fact_1].bit_offset
-
-                                    sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
-
-                                    original_size = self.loaded_tables[3]['keyword_id'].distribution_size
-
-                                    if sampled_idx_final >= original_size:
-                                        exit
-                                        continue
+                                # reconstruct column values from factorized columns
 
                                 value_str = []
 
-                                for i, sampled_idx in enumerate(sampled_idxs):
-                                    if i < 2:
-                                        continue
-                                    look_up_id = i - 2
-                                    if view_id == 0 or view_id == 1:
-                                        if look_up_id == 0:
-                                            sampled_value = look_up_list[look_up_id][int(float(sampled_idx))]
-                                            if np.isnan(sampled_value):
-                                                value_str.append('')
-                                            else:
-                                                value_str.append(str(sampled_value))
-                                        elif look_up_id == 1:
-                                            col_id_fact_0 = self.content_dics[view_id][1]
-                                            col_id_fact_1 = self.content_dics[view_id][2]
-
-                                            sampled_idx_fact_0 = int(self.train_data.columns[col_id_fact_0].all_distinct_values[int(float(sampled_idx))]) \
-                                                                << self.train_data.columns[col_id_fact_0].bit_offset
-
-                                            sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[int(float(sampled_idxs[i+1]))]) \
-                                                                << self.train_data.columns[col_id_fact_1].bit_offset
-
-                                            sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
-
-                                            sampled_value = look_up_list[look_up_id][sampled_idx_final]
-                                            if np.isnan(sampled_value):
-                                                value_str.append('')
-                                            else:
-                                                value_str.append(str(sampled_value))
-                                    elif view_id == 2 or view_id == 4:
-                                        sampled_value = look_up_list[look_up_id][int(float(sampled_idx))]
-                                        if np.isnan(sampled_value):
-                                            value_str.append('')
-                                        else:
-                                            value_str.append(str(sampled_value))
-                                    elif view_id == 3:
-                                        if look_up_id == 0:
-                                            col_id_fact_0 = self.content_dics[view_id][0]
-                                            col_id_fact_1 = self.content_dics[view_id][1]
-
-                                            sampled_idx_fact_0 = int(self.train_data.columns[col_id_fact_0].all_distinct_values[
-                                                                    int(float(sampled_idx))]) \
-                                                                << self.train_data.columns[col_id_fact_0].bit_offset
-
-                                            sampled_idx_fact_1 = int(self.train_data.columns[col_id_fact_1].all_distinct_values[
-                                                                    int(float(sampled_idxs[i + 1]))])\
-                                                                << self.train_data.columns[col_id_fact_1].bit_offset
-
-                                            sampled_idx_final = sampled_idx_fact_0 + sampled_idx_fact_1
-
-                                            sampled_value = look_up_list[look_up_id][sampled_idx_final]
-                                            if np.isnan(sampled_value):
-                                                value_str.append('')
-                                            else:
-                                                value_str.append(str(sampled_value))
+                                for col_name in self.content_cols[table_id]:
+                                    # only check if the column is factorized
+                                    col_ids = self.content_cols[table_id][col_name]
+                                    if len(col_ids) > 1:
+                                        sampled_idx_value = 0
+                                        for col_id in col_ids:
+                                            current_idx_value = int(self.train_data.columns[col_id].all_distinct_values[int(float(current_val['sample'][0][col_id]))]) \
+                                                                << self.train_data.columns[col_id].bit_offset
+                                            sampled_idx_value += current_idx_value
+                                    else:
+                                        sampled_idx_value = int(float(current_val['sample'][0][col_ids[0]]))
+                                    
+                                    sampled_value = look_up_list[table_id][col_name][sampled_idx_value]
+                                    if np.isnan(sampled_value):
+                                        value_str.append('')
+                                    else:
+                                        value_str.append(str(sampled_value))
 
                                 value_str = ','.join(value_str)
 
-                                if not value_str in weight_dict[view_id]:
-                                    weight_dict[view_id][value_str] = scale_values[joined_table_id] * current_val[joined_table_id]
+                                if not value_str in weight_dict[table_id]:
+                                    weight_dict[table_id][value_str] = scale_values[table_id] * current_val[table_id]
                                 else:
-                                    weight_dict[view_id][value_str] += scale_values[joined_table_id] * current_val[joined_table_id]
-                                unrej[view_id] += 1
+                                    weight_dict[table_id][value_str] += scale_values[table_id] * current_val[table_id]
 
 
-                        for view_id in range(len(fk_table_idx)):
-                            joined_table_id = fk_table_idx[view_id]
-                            for value_str in weight_dict[view_id]:
-                                num_tuples = int(round(weight_dict[view_id][value_str]))
+                        for table_id in fk_table_idx:
+                            for value_str in weight_dict[table_id]:
+                                num_tuples = int(round(weight_dict[table_id][value_str]))
                                 if num_tuples == 0:
                                     num_tuples = 1
                                 fk_list = pk_list*(num_tuples // len(pk_list)) + pk_list[:num_tuples%len(pk_list)]
-                                if not (value_str in sampled_fk_tables[fk_table_idx[view_id]]):
-                                    sampled_fk_tables[joined_table_id][value_str] = fk_list
+                                if not (value_str in generated_fk_tables[table_id]):
+                                    generated_fk_tables[table_id][value_str] = fk_list
                                 else: 
-                                    sampled_fk_tables[joined_table_id][value_str] += fk_list
-                    
-                    
-                    print("number of unrejected samples: {}".format(unrej))
+                                    generated_fk_tables[table_id][value_str] += fk_list
 
                     folder_name = self.folder_name
                     print("saving generated tables...")
-                    res_file = open('./{}/title_{}.csv'.format(folder_name, str(iter_num)), 'w', encoding="utf8")
-                    res_file.write('id,production_year,kind_id\n')
-                    for val in sampled_table:
-                        for pk in sampled_table[val]:
-                            res_file.write(str(pk) + ',' + val + '\n')
+                    res_file = open('./{}/{}_{}.csv'.format(folder_name, self.join_tables[self.pk_table_id], str(iter_num)), 'w', encoding="utf8")
+                    header_str = self.generation_cols[self.join_tables[self.pk_table_id]+".csv"][0]
+                    for col_name in self.content_cols[self.pk_table_id]:
+                        header_str = header_str+",{}".format(col_name)
+                    res_file.write(header_str)
+                    res_file.write("\n")
+                    for val in generated_pk_table:
+                        values = val.split(",")
+                        for i in range(len(values)):
+                            if values[i].replace('.','',1).isdigit():
+                                values[i] = str(int(float(values[i])))
+                        for pk in generated_pk_table[val]:
+                            res_file.write(str(pk) + ',' + ','.join(values) + '\n')
                     res_file.close()
+                    print("generated number of distinct pk tuples: {}".format(len(generated_pk_table)))
+                    total_num = 0
+                    for val in generated_pk_table:
+                        total_num += len(generated_pk_table[val])
+                    print("generated total number of {} tuples: {}".format(self.join_tables[self.pk_table_id], total_num))
 
-                    for i in range(len(fk_table_idx)):
-                        fk_table_id = fk_table_idx[i]
-                        sampled_fk_table = sampled_fk_tables[fk_table_id]
+                    for table_id in fk_table_idx:
+                        generated_fk_table = generated_fk_tables[table_id]
 
-                        if i == 0:
-                            fk_res_file = open('./{}/cast_info_{}.csv'.format(folder_name, str(iter_num)), 'w', encoding="utf8")
-                            fk_res_file.write('movie_id,role_id,person_id\n')
-                        elif i == 1:
-                            fk_res_file = open('./{}/movie_companies_{}.csv'.format(folder_name, str(iter_num)), 'w', encoding="utf8")
-                            fk_res_file.write('movie_id,company_type_id,company_id\n')
-                        elif i == 2:
-                            fk_res_file = open('./{}/movie_info_{}.csv'.format(folder_name, str(iter_num)), 'w', encoding="utf8")
-                            fk_res_file.write('movie_id,info_type_id\n')
-                        elif i == 3:
-                            fk_res_file = open('./{}/movie_keyword_{}.csv'.format(folder_name, str(iter_num)), 'w', encoding="utf8")
-                            fk_res_file.write('movie_id,keyword_id\n')
-                        elif i == 4:
-                            fk_res_file = open('./{}/movie_info_idx_{}.csv'.format(folder_name, str(iter_num)), 'w', encoding="utf8")
-                            fk_res_file.write('movie_id,info_type_id\n')
+                        res_file = open('./{}/{}_{}.csv'.format(folder_name, self.join_tables[table_id], str(iter_num)), 'w', encoding="utf8")
+                        header_str = self.generation_cols[self.join_tables[table_id]+".csv"][0]
+                        for col_name in self.content_cols[table_id]:
+                            header_str = header_str+",{}".format(col_name)
+                        res_file.write(header_str)
+                        res_file.write("\n")
 
                         total_num = 0
-                        for val in sampled_fk_table:
-                            total_num += len(sampled_fk_table[val])
-                            for fk in sampled_fk_table[val]:
-                                fk_res_file.write(str(fk) + ',' + val + '\n')
-                        print("generated total number of {} tuples: {}".format(self.join_tables[fk_table_id], total_num))
+                        for val in generated_fk_table:
+                            total_num += len(generated_fk_table[val])
+                            values = val.split(",")
+                            for i in range(len(values)):
+                                if values[i].replace('.','',1).isdigit():
+                                    values[i] = str(int(float(values[i])))
+                            for fk in generated_fk_table[val]:
+                                res_file.write(str(fk) + ',' + ",".join(values) + '\n')
+                        print("generated total number of {} tuples: {}".format(self.join_tables[table_id], total_num))
                         res_file.close()
 
-                    print("generated number of distinct title tuples: {}".format(len(sampled_table)))
-                    total_num = 0
-                    for val in sampled_table:
-                        total_num += len(sampled_table[val])
-                    print("generated total number of title tuples: {}".format(total_num))
-                    gt_table = self.loaded_tables[self.sampled_table_idx].data
-                    gt_table = gt_table[['production_year', 'kind_id']]
-                    sampled_table_count = {}
-                    for val in sampled_table:
-                        sampled_table_count[val] = len(sampled_table[val])
-                    ce = self.AR_ComputeCE(gt_table, sampled_table_count, total_num, self.gt_caches)
+                    pk_column_list = []
+                    for col_name in self.content_cols[self.pk_table_id]:
+                        pk_column_list.append(col_name)
+                    gt_table = self.loaded_tables[self.pk_table_id].data
+                    gt_table = gt_table[pk_column_list]
+                    pk_table_count = {}
+                    for val in generated_pk_table:
+                        pk_table_count[val] = len(generated_pk_table[val])
+                    ce = self.AR_ComputeCE(pk_column_list, gt_table, pk_table_count, total_num, self.gt_caches)
 
-                    print("generated ce: {}".format(ce))
+                    print("Cross Entropy between original table and generated table: {}".format(ce))
 
                     current_time = time.time()
                     print("time lapsed so far: {}".format(current_time - final_time_start))
 
             self.model.model_bits = 0
-            results = 0
+            results = None
 
-            # results = self.evaluate(self.num_eval_queries_at_checkpoint_load,
-            #                         done=True)
-            # self._maybe_check_asserts(results, returns=None)
             return {
                 'epoch': 0,
                 'done': True,
@@ -1677,58 +1219,14 @@ class NeuroCard(tune.Trainable):
             assert not error, '\n'.join(message)
 
     def _save(self, tmp_checkpoint_dir):
-        if self.checkpoint_to_load or not self.save_checkpoint_at_end:
-            return {}
-        semi_str = 'usesemi' if self.semi_train else 'nosemi'
-        # NOTE: see comment at ReportModel() call site about model size.
-        if self.fixed_ordering is None:
-            if self.seed is not None:
-                PATH = 'models/{}-{:.1f}MB-model{:.3f}-{}-{}epochs-seed{}-{}-q-{}.pt'.format(
-                    self.dataset, self.mb, self.model.model_bits,
-                    self.model.name(), self.epoch, self.seed, semi_str, self.q_weight)
-            else:
-                PATH = 'models/{}-{:.1f}MB-model{:.3f}-{}-{}epochs-seed{}-{}-{}-q-{}.pt'.format(
-                    self.dataset, self.mb, self.model.model_bits,
-                    self.model.name(), self.epoch, self.seed, time.time(),semi_str,self.q_weight)
-        else:
-            PATH = 'models/{}-{:.1f}MB-model{:.3f}-{}-{}epochs-seed{}-order{}-{}-q-{}.pt'.format(
-                self.dataset, self.mb, self.model.model_bits, self.model.name(),
-                self.epoch, self.seed,
-                str(self.order_seed) if self.order_seed is not None else
-                '_'.join(map(str, self.fixed_ordering))[:60], semi_str,self.q_weight)
-
-        if self.dataset == 'imdb':
-            tuples_seen = self.bs * self.max_steps * self.epochs
-            PATH = PATH.replace(
-                '-seed', '-{}tups-seed'.format(utils.HumanFormat(tuples_seen)))
-
-            if len(self.join_tables) == 1:
-                PATH = PATH.replace('imdb',
-                                    'indep-{}'.format(self.join_tables[0]))
-
-        torch.save(self.model.state_dict(), PATH)
-        # wandb.save(PATH)
-        print('Saved to:', PATH)
-        return {'path': PATH}
+        return {}
 
     def stop(self):
         self.tbx_logger.flush()
         self.tbx_logger.close()
 
     def _log_result(self, results):
-        psamples = {}
-        # When we run > 1 epoch in one tune "iter", we want TensorBoard x-axis
-        # to show our real epoch numbers.
-        results['iterations_since_restore'] = results[
-            'training_iteration'] = self.epoch
-        for k, v in results['results'].items():
-            if 'psample' in k:
-                psamples[k] = v
-        # wandb.log(results)
-        self.tbx_logger.on_result(results)
-        self.tbx_logger._file_writer.add_custom_scalars_multilinechart(
-            map(lambda s: 'ray/tune/results/{}'.format(s), psamples.keys()),
-            title='psample')
+        pass
 
     def ErrorMetric(self, est_card, card):
         if card == 0 and est_card != 0:
@@ -1765,86 +1263,6 @@ class NeuroCard(tune.Trainable):
 
         print()
 
-    def evaluate(self, num_queries, done, estimators=None):
-        model = self.model
-        if isinstance(model, DataParallelPassthrough):
-            model = model.module
-        model.eval()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
-        results = {}
-        if num_queries:
-            if estimators is None:
-                estimators = self.MakeProgressiveSamplers(
-                    model,
-                    self.train_data if self.factorize else self.table,
-                    do_fanout_scaling=(self.dataset == 'imdb'))
-                if self.eval_join_sampling:  # None or an int.
-                    estimators = [
-                        estimators_lib.JoinSampling(self.train_data, self.table,
-                                                    self.eval_join_sampling)
-                    ]
-
-            assert self.loaded_queries is not None
-            num_queries = min(len(self.loaded_queries), num_queries)
-            for i in range(self.train_queries, self.train_queries+self.test_queries):
-                print('Query {}:'.format(i), end=' ')
-                query = self.loaded_queries[i]
-                self.Query(estimators,
-                           oracle_card=None if self.oracle_cards is None else
-                           self.oracle_cards[i],
-                           query=query,
-                           table=self.table,
-                           oracle_est=self.oracle)
-                if i % 100 == 0:
-                    for est in estimators:
-                        est.report()
-
-            for est in estimators:
-                results[str(est) + '_max'] = np.max(est.errs)
-                results[str(est) + '_p99'] = np.quantile(est.errs, 0.99)
-                results[str(est) + '_p95'] = np.quantile(est.errs, 0.95)
-                results[str(est) + '_median'] = np.median(est.errs)
-                est.report()
-
-                series = pd.Series(est.query_dur_ms)
-                print(series.describe())
-                series.to_csv(str(est) + '.csv', index=False, header=False)
-
-            # estimate job-light queries
-            print("start estimating job-light queries")
-
-            for est in estimators:
-                est.ClearRecords()
-
-            for i in range(len(self.loaded_job_light_queries)):
-                print('Query {}:'.format(i), end=' ')
-
-                query = self.loaded_job_light_queries[i]
-                self.Query(estimators,
-                           oracle_card=None if self.job_light_oracle_cards is None else
-                           self.job_light_oracle_cards[i],
-                           query=query,
-                           table=self.table,
-                           oracle_est=self.oracle)
-                if i % 30 == 0:
-                    for est in estimators:
-                        est.report()
-
-                for est in estimators:
-                    results[str(est) + '_light_max'] = np.max(est.errs)
-                    results[str(est) + '_light_p99'] = np.quantile(est.errs, 0.99)
-                    results[str(est) + '_light_p95'] = np.quantile(est.errs, 0.95)
-                    results[str(est) + '_light_median'] = np.median(est.errs)
-                    est.report()
-
-                    series = pd.Series(est.query_dur_ms)
-                    print(series.describe())
-
-        return results
-
 if __name__ == '__main__':
     ray.init(ignore_reinit_error=True)
 
@@ -1858,7 +1276,7 @@ if __name__ == '__main__':
     tune.run_experiments(
         {
             k: {
-                'run': NeuroCard,
+                'run': SAM,
                 'checkpoint_at_end': True,
                 'resources_per_trial': {
                     'gpu': num_gpus,

@@ -156,97 +156,6 @@ JOB_LIGHT_BASE = {
     'order_indicators_at_front': False,
 }
 
-DMV_BASE = {
-    'dataset': 'dmv-full',
-    'join_tables': [
-        'dmv'
-    ],
-    'join_keys': {},
-    # Sampling starts at this table and traverses downwards in the join tree.
-    'join_root': 'dmv',
-    # Inferred.
-    'join_clauses': None,
-    'join_how': 'outer',
-    # Used for caching metadata.  Each join graph should have a unique name.
-    'join_name': 'dmv-full',
-    # See datasets.py.
-    'use_cols': 'simple',
-    'seed': 0,
-    'per_row_dropout': False,
-    'table_dropout': False,
-    'embs_tied': True,
-    # Num tuples trained =
-    #   bs (batch size) * max_steps (# batches per "epoch") * epochs.
-    'epochs': 1,
-    'bs': 2048,
-    # Use this fraction of total steps as warmups.
-    'warmups': 0.05,
-    # Number of DataLoader workers that perform join sampling.
-    'loader_workers': 8,
-    # Options: factorized_sampler, fair_sampler (deprecated).
-    'sampler': 'factorized_sampler',
-    'sampler_batch_size': 1024 * 4,
-    'layers': 4,
-    # Eval:
-    'compute_test_loss': True,
-    'queries_csv': './queries/dmv-fullworkload_with_card_2000.txt',
-    'num_eval_queries_per_iteration': 2000,
-    'num_eval_queries_at_end': 70,
-    'eval_psamples': [4000],
-
-    'checkpoint_every_epoch': True,
-    # Multi-order.
-    'special_orders': 0,
-    'order_content_only': True,
-    'order_indicators_at_front': False,
-}
-
-TPC_BASE = {
-    'dataset': 'tpc',
-    'join_tables': [
-        'tpc'
-    ],
-    'join_keys': {},
-    # Sampling starts at this table and traverses downwards in the join tree.
-    'join_root': 'tpc',
-    # Inferred.
-    'join_clauses': None,
-    'join_how': 'outer',
-    # Used for caching metadata.  Each join graph should have a unique name.
-    'join_name': 'tpc',
-    # See datasets.py.
-    'use_cols': 'simple',
-    'seed': 0,
-    'per_row_dropout': False,
-    'table_dropout': False,
-    'embs_tied': True,
-    # Num tuples trained =
-    #   bs (batch size) * max_steps (# batches per "epoch") * epochs.
-    'epochs': 1,
-    'bs': 2048,
-    'max_steps': 500,
-    # Use this fraction of total steps as warmups.
-    'warmups': 0.05,
-    # Number of DataLoader workers that perform join sampling.
-    'loader_workers': 8,
-    # Options: factorized_sampler, fair_sampler (deprecated).
-    'sampler': 'factorized_sampler',
-    'sampler_batch_size': 1024 * 4,
-    'layers': 4,
-    # Eval:
-    'compute_test_loss': True,
-    'queries_csv': './queries/dmv-fullworkload_with_card_220000.2_0.4_range_0.01_boundattr.txt',
-    'num_eval_queries_per_iteration': 2000,
-    'num_eval_queries_at_end': 70,
-    'eval_psamples': [4000],
-
-    'checkpoint_every_epoch': True,
-    # Multi-order.
-    'special_orders': 0,
-    'order_content_only': True,
-    'order_indicators_at_front': False,
-}
-
 FACTORIZE = {
     'factorize': True,
     'word_size_bits': 10,
@@ -405,92 +314,6 @@ EXPERIMENT_CONFIGS = {
             'word_size_bits': tune.grid_search([11]),
         }),
 
-    'dmv': dict(
-            dict(BASE_CONFIG, **DMV_BASE),
-        **{
-            'factorize': True,
-            'grouped_dropout': True,
-            'embed_size': tune.grid_search([16]),
-            # 'lr_scheduler': tune.grid_search(['OneCycleLR-0.28']),
-            'loader_workers': 4,
-            'max_steps': tune.grid_search([500]),
-            'q_weight': tune.grid_search([0.0001, 0.001, 0.01, 0.1]),
-            'epochs': 10,
-            'num_eval_queries_per_iteration': 30,
-            'num_eval_queries_at_end': 2000,
-            'input_no_emb_if_leq': False,
-            'eval_psamples': [200, 2000],
-            'epochs_per_iteration': 1,
-            'semi_train': True,
-            'table_dropout': False,
-            'lr_scheduler': None,
-            'warmups': 0.1,
-            'resmade_drop_prob': tune.grid_search([0]),
-            'label_smoothing': tune.grid_search([0]),
-            'word_size_bits': tune.grid_search([8,9,10]),
-            'checkpoint_every_epoch': True,
-            'train_queries': 20000,
-            'test_queries': 2000,
-        }),
-
-    'dmv-reload': dict(
-                dict(BASE_CONFIG, **DMV_BASE),
-            **{
-                'factorize': True,
-                'grouped_dropout': True,
-                'embed_size': tune.grid_search([16]),
-                'checkpoint_to_load': 'models/dmv-pretrained.pt',
-                # 'lr_scheduler': tune.grid_search(['OneCycleLR-0.28']),
-                'loader_workers': 4,
-                'constant_lr': 5e-4,
-                # 'q_weight': tune.grid_search([0.0001, 0.001, 0.01, 0.1]),
-                'epochs': 20,
-                'num_eval_queries_per_iteration': 30,
-                'num_eval_queries_at_end': 2000,
-                'input_no_emb_if_leq': False,
-                'eval_psamples': [200, 2000],
-                'epochs_per_iteration': 1,
-                'bs': 50,
-                'semi_train': True,
-                'table_dropout': False,
-                'lr_scheduler': None,
-                'warmups': 0.1,
-                'resmade_drop_prob': tune.grid_search([0]),
-                'label_smoothing': tune.grid_search([0]),
-                'word_size_bits': tune.grid_search([10]),
-                'checkpoint_every_epoch': True,
-                'train_queries': 0,
-                'test_queries': 2000,
-            }),
-
-    'tpc': dict(
-                dict(BASE_CONFIG, **TPC_BASE),
-            **{
-                'factorize': True,
-                'grouped_dropout': True,
-                'embed_size': tune.grid_search([16]),
-                # 'lr_scheduler': tune.grid_search(['OneCycleLR-0.28']),
-                'loader_workers': 4,
-                'max_steps': tune.grid_search([500]),
-                'q_weight': tune.grid_search([0]),
-                'epochs': 10,
-                'num_eval_queries_per_iteration': 30,
-                'num_eval_queries_at_end': 2000,
-                'input_no_emb_if_leq': False,
-                'eval_psamples': [200, 2000],
-                'epochs_per_iteration': 1,
-                'semi_train': False,
-                'table_dropout': False,
-                'lr_scheduler': None,
-                'warmups': 0.1,
-                'resmade_drop_prob': tune.grid_search([0]),
-                'label_smoothing': tune.grid_search([0]),
-                'word_size_bits': tune.grid_search([10]),
-                'checkpoint_every_epoch': True,
-                'train_queries': 20000,
-                'test_queries': 2000,
-            }),
-
     # JOB-light-ranges, NeuroCard base.
     'job-light-ranges': dict(
         dict(dict(BASE_CONFIG, **JOB_LIGHT_BASE), **FACTORIZE),
@@ -559,15 +382,15 @@ EXPERIMENT_CONFIGS = {
         },
     ),
 
-    'job-light-ranges-gumbel': dict(
+    'job-light-ranges-mscn-workload': dict(
     dict(dict(dict(BASE_CONFIG, **JOB_LIGHT_BASE), **FACTORIZE)),
     **{
         # Train for a bit and checks that these metrics are reasonable.
         'use_cols': 'content',
         'num_eval_queries_per_iteration': 1000,
         # 10M tuples total.
-        'max_steps': tune.grid_search([500]),
-        'epochs': 30,
+        'max_steps': tune.grid_search([5000]),
+        'epochs': 50,
         # Evaluate after every 1M tuples trained.
         'epochs_per_iteration': 1,
         'loader_workers': 4,
@@ -575,62 +398,24 @@ EXPERIMENT_CONFIGS = {
         'resmade_drop_prob': tune.grid_search([0]),
         'label_smoothing': tune.grid_search([0]),
         'fc_hiddens': 128,
-        #'constant_lr': tune.grid_search([5e-3, 6e-3]),
         'embed_size': tune.grid_search([16]),
         'word_size_bits': tune.grid_search([14]),
         'table_dropout': False,
         'lr_scheduler': None,
         'warmups': tune.grid_search([0.01, 0.03 ,0.05, 0.07, 0.09, 0.12, 0.15]),
-        'queries_csv': './queries/job-light-range-train.csv',
+        'queries_csv': './queries/mscn_queries_neurocard_format.csv',
         'subqueries_csv': None,
-        'job_light_queries_csv': './queries/job-light-refined.csv',
+        'job_light_queries_csv': './queries/job-light.csv',
         'semi_train': True,
-        #'q_weight': tune.grid_search([1e-12, 1e-11, 1e-10, 1e-9, 1e-8, 1e-7, 1e-6]),
-        #'q_weight': tune.grid_search([1e-5, 0.0001, 0.001, 0.01, 0.1, 1]),
-        #'q_weight': tune.grid_search([1e-5, 0.0001, 0.001, 0.01 , 0.1, 1, 10, 100]),
-        #'q_weight': tune.grid_search([10, 100, 1000, 10000]),
-        #'q_weight': tune.grid_search([5, 8, 20, 30, 40, 50, 60, 70]),
-       # 'q_weight': tune.grid_search([9, 9.5, 10, 10.5, 11, 12]),
         'q_weight': tune.grid_search([10]),
-        'checkpoint_every_epoch': False,
-        'eval_psamples': [1000, 8000],
-        'train_queries': 10000,
-        'test_queries': 1000,
-        'train_virtual_cols': True,
-        },
-    ),
-
-    'job-light-ranges-sub-gumbel': dict(
-    dict(dict(dict(BASE_CONFIG, **JOB_LIGHT_BASE), **FACTORIZE)),
-    **{
-        # Train for a bit and checks that these metrics are reasonable.
-        'use_cols': 'content',
-        'num_eval_queries_per_iteration': 0,
-        'num_eval_queries_at_end': 0,
-        # 10M tuples total.
-        'max_steps': tune.grid_search([500]),
-        'epochs': 10,
-        # Evaluate after every 1M tuples trained.
-        'epochs_per_iteration': 1,
-        'loader_workers': 4,
-        'input_no_emb_if_leq': False,
-        'resmade_drop_prob': tune.grid_search([0]),
-        'label_smoothing': tune.grid_search([0]),
-        'fc_hiddens': 128,
-        'embed_size': tune.grid_search([16]),
-        'word_size_bits': tune.grid_search([14]),
-        'table_dropout': False,
-        'lr_scheduler': None,
-        'warmups': 0.1,
-        'queries_csv': './queries/job-light-range-train.csv',
-        'subqueries_csv': './queries/job-light-range-train-subs-with-cards.csv',
-        'semi_train': True,
-        'q_weight': tune.grid_search([0.01, 0.1, 1 ,10, 100]),
-        #'q_weight': tune.grid_search([1e-5, 0.0001, 0.001, 0.01, 0.1, 1]),
         'checkpoint_every_epoch': True,
         'eval_psamples': [1000, 8000],
-        'train_queries': 20000,
-        'test_queries': 1000,
+        'train_queries': 100000,
+        'test_queries': 0,
+        'train_virtual_cols': True,
+        'run_uaeq': False,
+        'save_result_dir': "test_results/preds/",
+        'save_model_dir': "test_results/models/"
         },
     ),
 
@@ -720,27 +505,6 @@ TEST_CONFIGS['test-job-light-ranges'] = dict(
             'fact_psample_8000_p99': 105,
             'train_bits': 70,
         },
-    })
-
-TEST_CONFIGS['job-light-ranges-reload'] = dict(
-    EXPERIMENT_CONFIGS['job-light-ranges'],
-    **{
-        'queries_csv': 'queries/mscn_400.csv',
-        'checkpoint_to_load': 'models/uaeq-mscn-400.pt',
-        'eval_psamples': [1000, 8000],
-        'subqueries_csv':None,
-        # Evaluating on all queries takes a while.  Shorten the wait by
-        # setting this flag (adjust asserts too) during testing:
-        # 'num_eval_queries_at_checkpoint_load': 50,
-        'train_queries': 10000,
-        'test_queries': 1000,
-        'asserts': {
-            'fact_psample_512_median': 2.0,
-            'fact_psample_512_p99': 400,
-            'fact_psample_8000_median': 1.9,
-            'fact_psample_8000_p99': 400,
-        },
-        'folder_name': 'db_generation'
     })
 
 #  estimating for postgreSQL
@@ -893,6 +657,40 @@ TEST_CONFIGS['job-m-reload'] = dict(
             'fact_psample_8000_p99': 2410,
         },
     })
+
+TEST_CONFIGS['uae-job-light-ranges-reload'] = dict(
+    EXPERIMENT_CONFIGS['job-light-ranges'],
+    **{
+        'queries_csv': './queries/mscn_queries_neurocard_format.csv',
+        'job_light_queries_csv': './queries/job-light-sub-query.csv',
+        'checkpoint_to_load': './models/uae-job-light-ranges-mscn.h5',
+        'eval_psamples': [1000, 8000],
+        'subqueries_csv': None,
+        'test_queries':0
+    })
+
+TEST_CONFIGS['data-generation-job-light-MSCN-worklod'] = dict(
+    EXPERIMENT_CONFIGS['job-light-ranges'],
+    **{
+        'queries_csv': 'queries/mscn_400.csv',
+        'checkpoint_to_load': 'models/uaeq-mscn-400.pt',
+        'eval_psamples': [1000, 8000],
+        'subqueries_csv':None,
+        'folder_name': 'generated_database/imdb',
+        'pk_table': 'title',
+        # put the pk/fk column in the first entry for each table
+        'generation_cols': {
+                                'movie_info_idx.csv': ['movie_id', 'info_type_id'],
+                                'movie_companies.csv': ['movie_id', 'company_id', 'company_type_id'],
+                                'title.csv': ['id', 'kind_id', 'production_year'],
+                                'cast_info.csv': ['movie_id', 'role_id', 'person_id'],
+                                'movie_keyword.csv': ['movie_id', 'keyword_id'],
+                                'movie_info.csv': ['movie_id','info_type_id',]
+                            }  ,
+        'total_iterations': 100,
+        'save_frequency': 100,
+    })
+
 
 for name in TEST_CONFIGS:
     TEST_CONFIGS[name].update({'save_checkpoint_at_end': False})

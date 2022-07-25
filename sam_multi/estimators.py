@@ -214,6 +214,39 @@ def FillInUnqueriedColumns(table, columns, operators, vals):
 
     return cs, os, vs
 
+def FillInUnqueriedColumnsBatch(table, columns_list, operators_list, vals_list):
+    """Allows for some columns to be unqueried (i.e., wildcard).
+
+    Returns cols, ops, vals, where all 3 lists of all size len(table.columns),
+    in the table's natural column order.
+
+    A None in ops/vals means that column slot is unqueried.
+    """
+    ncols = len(table.columns)
+    cs = table.columns
+
+    result_operators_list = []
+    result_vals_list = []
+
+    for i in range(len(columns_list)):
+        os, vs = [None] * ncols, [None] * ncols
+
+        for c, o, v in zip(columns_list[i], operators_list[i], vals_list[i]):
+            idx = table.ColumnIndex(c.name)
+
+            if os[idx] is None:
+                os[idx] = [o]
+                vs[idx] = [v]
+            else:
+                # Multiple clauses on same attribute.
+                os[idx].append(o)
+                vs[idx].append(v)
+
+        result_operators_list.append(os)
+        result_vals_list.append(vs)
+
+    return cs, result_operators_list, result_vals_list
+
 
 def ConvertLikeToIn(fact_table, columns, operators, vals):
     """Pre-processes a query by converting LIKE predicates to IN predicates.
@@ -1706,7 +1739,6 @@ class DifferentialbleProgressiveSampling(CardEst):
                 # Make sure to revert the probabilities so that the final
                 # calculation is correct.
                 #probs_i = probs_i.masked_fill_(paths_vanished, 0.0)
-
                 # Only Factorized PS should go down this path.
                 if has_mask:
                     self.update_factor_mask(samples_i,
@@ -2094,7 +2126,1147 @@ class DifferentialbleFactorizedProgressiveSampling(DifferentialbleProgressiveSam
                     new_mask |= self.factor_mask[i]
             self.factor_mask[i] = new_mask
 
+class BatchDifferentiableProgressiveSampling(CardEst):
+    """Progressive sampling."""
 
+    def __init__(
+            self,
+            model,
+            table,
+            r,
+            join_spec=None,
+            device=None,
+            seed=False,
+            cardinality=None,
+            shortcircuit=False,  # Skip sampling on wildcards?
+            do_fanout_scaling=False,
+            is_training=True,
+            tau=1.,
+            bs=None,
+            train_virtual_cols=True,
+            batch_size=20
+    ):
+        super(BatchDifferentiableProgressiveSampling, self).__init__()
+        torch.set_grad_enabled(False)
+        self.model = model
+        self.model.eval()
+        self.table = table
+        self.all_tables = set(join_spec.join_tables
+                             ) if join_spec is not None else _infer_table_names(
+                                 table.columns)
+        if join_spec:
+            self.join_graph = join_spec.join_graph
+        self.shortcircuit = shortcircuit
+        self.do_fanout_scaling = do_fanout_scaling
+        self.is_training = is_training
+        self.tau = tau
+
+        self.train_virtual_cols = train_virtual_cols
+        self.batch_size = batch_size
+
+        if do_fanout_scaling:
+            self.num_tables = len(self.all_tables)
+            print('# tables in join schema:', self.num_tables)
+
+            # HACK: For convenience of running JOB-like bennchmarks; make
+            # configurable.
+            #
+            # Additionally, we don't really need to know what is "primary", but
+            # the code assumes so since it can be beneficial (e.g., don't learn
+            # a bunch of trivial fanouts of 1).
+            self.primary_table_name = 'title'
+
+        if r <= 1.0:
+            self.r = r  # Reduction ratio.
+            self.num_samples = None
+        else:
+            self.num_samples = r
+
+        self.seed = seed
+        self.device = device
+
+        self.cardinality = cardinality
+        if cardinality is None:
+            self.cardinality = table.cardinality
+
+        if self.is_training is False:
+            with torch.no_grad():
+                self.init_logits = self.model(
+                    torch.zeros(self.batch_size, self.model.nin, device=device))
+        else:
+            self.init_logits = self.model(
+                torch.zeros(self.batch_size, self.model.nin, device=device))
+
+        self.dom_sizes = [c.DistributionSize() for c in self.table.columns]
+        self.dom_sizes = np.cumsum(self.dom_sizes)
+
+        ########### Inference optimizations below.
+        self.traced_fwd = None
+        # We can't seem to trace this because it depends on a scalar input.
+        self.traced_encode_input = model.EncodeInput
+
+        # Important: enable this inference-time optimization only when model is
+        # single-order.  When multiple orders, the masks would be updated so
+        # don't cache a single version of "mask * weight".
+        # TODO: turn this on only when benchmarking inference latency.
+        # if 'MADE' in str(model) and self.model.num_masks == 1:
+        #     for layer in model.net:
+        #         if type(layer) == made.MaskedLinear:
+        #             if layer.masked_weight is None:
+        #                 layer.masked_weight = layer.mask * layer.weight
+        #                 print('Setting masked_weight in MADE, do not retrain!')
+        #         elif type(layer) == made.MaskedResidualBlock:
+        #             for sublayer in layer.layers:
+        #                 if type(sublayer) == made.MaskedLinear:
+        #                     if sublayer.masked_weight is None:
+        #                         sublayer.masked_weight = sublayer.mask * sublayer.weight
+        #                         print(
+        #                             'Setting masked_weight in MADE, do not retrain!'
+        #                         )
+        # for p in model.parameters():
+        #     p.detach_()
+        #     p.requires_grad = False
+        # self.init_logits.detach_()
+
+        self.logits_outs = []
+        for natural_idx in range(self.model.nin):
+            self.logits_outs.append(
+                self.model.logits_for_col(natural_idx, self.init_logits))
+        ########### END inference opts
+
+        if self.is_training is False:
+            with torch.no_grad():
+                self.kZeros = torch.zeros(self.batch_size,
+                                          self.num_samples,
+                                          self.model.nin,
+                                          device=self.device)
+                self.inp = self.traced_encode_input(self.kZeros.view(-1, self.model.nin))
+
+                # For transformer, need to flatten [num cols, d_model].
+                self.inp = self.inp.view(self.batch_size, self.num_samples, -1)
+        else:
+            self.kZeros = torch.zeros(self.batch_size,
+                                      self.num_samples,
+                                      self.model.nin,
+                                      device=self.device)
+            self.inp = self.traced_encode_input(self.kZeros.view(-1, self.model.nin))
+
+            # For transformer, need to flatten [num cols, d_model].
+            self.inp = self.inp.view(self.batch_size, self.num_samples, -1)
+
+    def __str__(self):
+        if self.num_samples:
+            n = self.num_samples
+        else:
+            n = int(self.r * self.table.columns[0].DistributionSize())
+        return 'psample_{}'.format(n)
+
+    def _maybe_remove_nan(self, dvs):
+        # NOTE: "dvs[0] is np.nan" or "dvs[0] == np.nan" don't work.
+        if dvs.dtype == np.dtype('object') and pd.isnull(dvs[0]):
+            return dvs[1:], True
+        return dvs, False
+        # if np.isnan(dvs).any():
+        #     return dvs[1:], True
+        # else:
+        #     return dvs, False
+                        
+
+    def _get_valids(self, distinct_values, op_list, val_list, natural_idx, num_samples, indicator_i):
+        """Returns a float vec indicating the valid bins in distinct_values."""
+        valid_i_list = []
+        for i in self.batch_size:
+            if indicator_i[i]:
+                distinct_values_rm, removed_nan = self._maybe_remove_nan(distinct_values)
+                valid_i = np.ones_like(distinct_values_rm, np.bool)
+                for o, v in zip(op, val_list[i]):
+                    # Use &= since we assume conjunction.
+                    valid_i &= OPS[o](distinct_values_rm, v)
+                valid_i = valid_i.astype(np.float32, copy=False)
+                if removed_nan:
+                    # NaN is always an invalid sample target, unless op is IS_NULL.
+                    v = 1. if op == ['IS_NULL'] else 0.
+                    valid_i = np.insert(valid_i, 0, v)
+            else:
+                distinct_values_rm, removed_nan = self._maybe_remove_nan(distinct_values)
+                valid_i = np.ones_like(distinct_values_rm, np.bool)
+                valid_i = valid_i.astype(np.float32, copy=False)
+                if removed_nan:
+                    # NaN is always an invalid sample target, unless op is IS_NULL.
+                    v = 1. if op == ['IS_NULL'] else 0.
+                    valid_i = np.insert(valid_i, 0, v)
+
+            valid_i_list.append(valid_i)
+
+
+        # return a has_mask_list of all false if not using column factorization
+        return valid_i_list, [False for i in range(self.batch_size)]
+
+    def _truncate_val_string(self, val):
+        truncated_vals = []
+        for v in val:
+            if type(v) == tuple:
+                new_val = str(list(v)[:20]) + '...' + str(
+                    len(v) - 20) + ' more' if len(v) > 20 else list(v)
+            else:
+                new_val = v
+            truncated_vals.append(new_val)
+        return truncated_vals
+
+    def _print_probs(self, columns, operators, vals, ordering, masked_logits):
+        ml_i = 0
+        for i in range(len(columns)):
+            natural_idx = ordering[i]
+            if operators[natural_idx] is None:
+                continue
+            truncated_vals = self._truncate_val_string(vals[natural_idx])
+            print('  P({} {} {} | past) ~= {:.6f}'.format(
+                columns[natural_idx].name, operators[natural_idx],
+                truncated_vals, masked_logits[ml_i].mean().cpu().item()))
+            ml_i += 1
+
+    @profile
+    def get_probs_for_col(self, logits, natural_idx, num_classes):
+        """Returns probabilities for column i given model and logits."""
+        num_samples = logits.size()[0]
+        if False:  #self.model.UseDMoL(natural_idx):
+            dmol_params = self.model.logits_for_col(
+                natural_idx, logits)  # (num_samples, num_mixtures*3)
+            logits_i = torch.zeros((num_samples, num_classes),
+                                   device=self.device)
+            for i in range(num_classes):
+                logits_i[:, i] = distributions.dmol_query(
+                    dmol_params,
+                    torch.ones(num_samples, device=self.device) * i,
+                    num_classes=num_classes,
+                    num_mixtures=self.model.num_dmol,
+                    scale_input=self.model.scale_input)
+        else:
+            logits_i = self.model.logits_for_col(
+                natural_idx, logits, out=None)
+        return torch.softmax(logits_i, 1)
+
+    def _get_fanout_columns_list(self, cols, vals_list):
+        result_list = []
+        for vals in vals_list:
+            # What tables are joined in this query?
+            q_tables = GetTablesInQuery(cols, vals)
+            some_query_table = next(iter(q_tables))  # pick any table in the query
+            fanout_tables = self.all_tables - q_tables
+
+            # For each table not in the query, find a path to q_table. The first
+            # edge in the path gives the correct fanout column. We use
+            # `shortest_path` here but the path is actually unique.
+            def get_fanout_key(u):
+                if self.join_graph is None:
+                    return None
+                path = nx.shortest_path(self.join_graph, u, some_query_table)
+                v = path[1]  # the first hop from the starting node u
+                join_key = self.join_graph[u][v]["join_keys"][u]
+                return join_key
+
+            fanout_cols = [(t, get_fanout_key(t)) for t in fanout_tables]
+
+            # The fanouts from a "primary" table are always 1.
+            result_list.append(list(filter(lambda tup: tup[0] != self.primary_table_name, fanout_cols)))
+        
+        return result_list
+    
+    def _get_fanout_columns(self, cols, vals):
+        # What tables are joined in this query?
+        q_tables = GetTablesInQuery(cols, vals)
+        some_query_table = next(iter(q_tables))  # pick any table in the query
+        fanout_tables = self.all_tables - q_tables
+
+        # For each table not in the query, find a path to q_table. The first
+        # edge in the path gives the correct fanout column. We use
+        # `shortest_path` here but the path is actually unique.
+        def get_fanout_key(u):
+            if self.join_graph is None:
+                return None
+            path = nx.shortest_path(self.join_graph, u, some_query_table)
+            v = path[1]  # the first hop from the starting node u
+            join_key = self.join_graph[u][v]["join_keys"][u]
+            return join_key
+
+        fanout_cols = [(t, get_fanout_key(t)) for t in fanout_tables]
+
+        # The fanouts from a "primary" table are always 1.
+        return list(
+            filter(lambda tup: tup[0] != self.primary_table_name, fanout_cols))
+
+    def _get_fanout_columns_index_all(self):
+        index_list = []
+        for name in self.table.name_to_index:
+            if name.find('__fanout_') != -1:
+                index_list.append(self.table.ColumnIndex(name))
+
+        index_list.sort()
+        
+        return index_list
+
+        
+    def _get_fanout_column_index(self, fanout_col):
+        """Returns the natural index of a fanout column.
+
+        For backward-compatibility, try both `__fanout_{table}` and
+        `__fanout_{table}__{col}`.
+        """
+        table, key = fanout_col
+        for col_name in [
+                '__fanout_{}__{}'.format(table, key),
+                '__fanout_{}'.format(table)
+        ]:
+            if col_name in self.table.name_to_index:
+                return self.table.ColumnIndex(col_name)
+        assert False, (fanout_col, self.table.name_to_index)
+
+    @profile
+    def _scale_probs(self, columns, operators_list, vals_list, p, ordering, num_fanouts,
+                     num_indicators, inp_list, inp, train_virtual_cols=True):
+        # TODO: Deal with indicators and fanout columns potentially being
+        # factorized?  Current code assumes that these virtual columns are
+        # never factorized (in JOB-M fanouts are factorized, but that's ok as
+        # it *happens* to not need factorized fanouts in downscaling).
+
+
+        # Find out what foreign tables are not present in this query.
+        fanout_cols_list = self._get_fanout_columns_list(columns, vals_list)
+        indexes_to_scale_list = [[ 
+            self._get_fanout_column_index(col) for col in fanout_cols
+        ] for fanout_cols in fanout_cols_list]
+
+
+        fanout_cols_index_all = self._get_fanout_columns_index_all()
+
+        indicator = torch.zeros((self.batch_size, len(fanout_cols_index_all)), device=self.device)
+        for i in range(self.batch_size):
+            for j in indexes_to_scale_list[i]:
+                indicator[i][j - fanout_cols_index_all[0]] = 1
+
+        if train_virtual_cols:
+            scale_array = []
+            # scale = torch.ones_like(p, device=self.device, dtype=torch.float32)
+        else:
+            scale = 1.0
+
+
+        for i in range(len(fanout_cols_index_all)):
+
+            indicator_i = indicator[:, i]
+
+            if not torch.any(indicator_i > 0):
+                continue
+
+            natural_index = fanout_cols_index_all[i] if ordering is None else ordering[fanout_cols_index_all[i]]
+
+            # Sample the fanout factors & feed them back as input.  This
+            # modeling of AR dependencies among the fanouts improves errors
+            # (than if they were just dependent on the content+indicators).
+            inp_res = []
+            count_id = 0
+            for col_inp in inp_list:
+                if col_inp is None:
+                    if count_id == 0:
+                        inp_res.append(inp[:, :self.model.input_bins_encoded_cumsum[0]])
+                    else:
+                        l = self.model.input_bins_encoded_cumsum[count_id - 1]
+                        r = self.model.input_bins_encoded_cumsum[count_id]
+                        inp_res.append(inp[:, l:r])
+                else:
+                    inp_res.append(col_inp)
+                count_id += 1
+
+            inp_res_tensor = torch.cat(inp_res, dim=1)
+
+            logits = self._forward_encoded_input(inp_res_tensor,
+                                                sampling_ordering=ordering)
+
+            # The fanouts are deterministic function based on join key.  We
+            # can either model the join keys, and thus can sample a join
+            # key and lookup.  Alternatively, we directly model the fanouts
+            # and sample them.  Sample works better than argmax or
+            # expectation.
+
+            # fanout_probs = self.get_probs_for_col(
+            #     logits, natural_index, columns[natural_index].distribution_size)
+
+            # Turn this on when measuring inference latency: multinomial() is
+            # slightly faster than Categorical() then sample().  The latter has
+            # a convenient method for printing perplexity though.
+            # scales = torch.multinomial(fanout_probs, 1)
+            # dist = torch.distributions.categorical.Categorical(fanout_probs)
+            # scales = dist.sample()
+
+            if train_virtual_cols:
+                logits_i = self.model.logits_for_col(
+                    natural_index, logits, out=None)  # [bs*num_samples, col_colsize];
+
+                # samples_i of shape [bs*num_samples, col_colsize]
+                samples_i = torch.nn.functional.gumbel_softmax(logits_i, tau=self.tau, hard=True)
+                scale_vec = np.arange(logits_i.shape[1])
+
+                #scale_vec of shape [col_colsize, 1]
+                scale_vec = torch.as_tensor(scale_vec, dtype=torch.float32, device=self.device)
+                #scale_vec = scale_vec.view(1, -1).repeat(logits_i.shape[0], 1)
+                scale_vec = scale_vec.view(-1, 1)
+
+                # (bs*num_samples, 1)
+                scales = torch.matmul(samples_i, scale_vec)
+
+                # Off-by-1 in fanout's domain: 0 -> np.nan, 1 -> value 0, 2 ->
+                # value 1.
+
+                actual_scale_values = (scales - 1).clamp_(1)
+
+                # (bs, num_samples)
+                actual_scale_values = actual_scale_values.view(self.batch_size, -1)
+
+                indicator_i = indicator_i.view(-1, 1)
+
+                indicator_i = torch.repeat_interleave(indicator_i, actual_scale_values.size(1),
+                                                                    dim=0)
+
+
+                # if 'VERBOSE' in os.environ:
+                #     print('scaling', columns[natural_index], 'with',
+                #           actual_scale_values.float().mean().item(), '; perplex.',
+                #           dist.perplexity()[:3])
+
+                # set the fanout factor of table not involved to 1
+                actual_scale_values[indicator_i.view(self.batch_size, -1)==0] = 1
+
+                scale_array.append(actual_scale_values)
+                # scale = scale * actual_scale_values
+
+                # Put the sampled 'scales' back into input, so that fanouts to
+                # be sampled next can depend on the current fanout value.
+                # inp_list[natural_index] = self._put_samples_as_input(samples_i, inp, natural_index)
+
+                normal_inp_candidate = self.model.EncodeInput(
+                                                samples_i,
+                                                natural_col=natural_index,
+                                                is_onehot=self.is_training)
+                wildcard_inp_candidate = self.model.EncodeInput(
+                    None,
+                    natural_col=natural_index,
+                    is_onehot=self.is_training)
+
+                normal_candidate = torch.where(indicator_i == 0, wildcard_inp_candidate,
+                                                normal_inp_candidate)
+
+                inp_list[natural_index] = normal_candidate
+
+            else:
+                with torch.no_grad():
+                    fanout_probs = self.get_probs_for_col(
+                        logits, natural_index, columns[natural_index].distribution_size)
+
+                    dist = torch.distributions.categorical.Categorical(fanout_probs)
+                    scales = dist.sample()
+
+                    # Off-by-1 in fanout's domain: 0 -> np.nan, 1 -> value 0, 2 ->
+                    # value 1.
+                    actual_scale_values = (scales - 1).clamp_(1)
+                    # inp_list[natural_index] = self._put_samples_as_input(scales.view(-1, 1),
+                    #                                                     inp, natural_index,
+                    #                                                     is_onehot=False)
+
+                    # (bs, num_samples)
+                    actual_scale_values = actual_scale_values.view(self.batch_size, -1)
+
+                    indicator_i = indicator_i.view(-1, 1)
+
+                    indicator_i = torch.repeat_interleave(indicator_i, actual_scale_values.size(1),
+                                                                        dim=0)
+
+                    actual_scale_values[indicator_i.view(self.batch_size, -1)==0] = 1
+
+                    normal_inp_candidate = self.model.EncodeInput(
+                                                scales,
+                                                natural_col=natural_index,
+                                                is_onehot=False)
+                    wildcard_inp_candidate = self.model.EncodeInput(
+                        None,
+                        natural_col=natural_index,
+                        is_onehot=self.is_training)
+
+                    # indicator_i = wildcard_indicator[:, i].view(-1, 1)  # [bs, 1]
+                    #indicator_i.repeat(1, wildcard_inp_candidate.shape[-1])
+
+                    normal_candidate = torch.where(indicator_i == 0, wildcard_inp_candidate,
+                                                    normal_inp_candidate)
+                    inp_list[natural_index] = normal_candidate
+
+                scale *= actual_scale_values
+
+                # Put the sampled 'scales' back into input, so that fanouts to
+                # be sampled next can depend on the current fanout value.
+
+        if train_virtual_cols:
+            scale = scale_array[0]
+            for i in range(len(scale_array)-1):
+                scale = scale * scale_array[i+1]
+
+        if os.environ.get('VERBOSE', None) == 2:
+            print('  p quantiles',
+                np.quantile(p.cpu().numpy(), [0.5, 0.9, 0.99, 1.0]), 'mean',
+                p.mean())
+            print('  scale quantiles',
+                np.quantile(scale.cpu().numpy(), [0.5, 0.9, 0.99, 1.0]),
+                'mean', scale.mean())
+
+        scaled_p = p / scale.to(dtype=torch.float, device=self.device)
+
+        if os.environ.get('VERBOSE', None) == 2:
+            print('  scaled_p quantiles',
+                np.quantile(scaled_p.cpu().numpy(), [0.5, 0.9, 0.99, 1.0]),
+                'mean', scaled_p.mean())
+
+        # NOTE: overflow can happen for undertrained models.
+        zero_p = torch.zeros_like(scaled_p, device=self.device)
+        scaled_p = torch.where(scaled_p == np.inf, zero_p, scaled_p)
+        #scaled_p[scaled_p == np.inf] = 0
+
+        if os.environ.get('VERBOSE', None) == 2:
+            print('  (after clip) scaled_p quantiles',
+                np.quantile(scaled_p.cpu().numpy(), [0.5, 0.9, 0.99, 1.0]),
+                'mean', scaled_p.mean())
+
+        return scaled_p.mean(dim=1)
+
+    @profile
+    def _put_samples_as_input(self,
+                              data_to_encode,
+                              inp,
+                              natural_idx,
+                              sampling_order_idx=None, is_onehot=True):
+        """Puts [bs, 1] sampled values approipately into inp."""
+        if not isinstance(self.model, transformer.Transformer):
+            if natural_idx == 0:
+                res = self.model.EncodeInput(
+                    data_to_encode,
+                    natural_col=0,
+                    out=None, is_onehot=is_onehot)
+            else:
+                l = self.model.input_bins_encoded_cumsum[natural_idx - 1]
+                r = self.model.input_bins_encoded_cumsum[natural_idx]
+                res = self.model.EncodeInput(data_to_encode,
+                                       natural_col=natural_idx,
+                                       out=None, is_onehot=is_onehot)
+            return res
+        else:
+            # Transformer.  Need special treatment due to
+            # right-shift.
+            l = (natural_idx + 1) * self.model.d_model
+            r = l + self.model.d_model
+            if sampling_order_idx == 0:
+                # Let's also add E_pos=0 to SOS (if enabled).
+                # This is a no-op if disabled pos embs.
+                self.model.EncodeInput(
+                    data_to_encode,  # Will ignore.
+                    natural_col=-1,  # Signals SOS.
+                    out=inp[:, :self.model.d_model])
+
+            if transformer.MASK_SCHEME == 1:
+                # Should encode natural_col \in [0, ncols).
+                self.model.EncodeInput(data_to_encode,
+                                       natural_col=natural_idx,
+                                       out=inp[:, l:r])
+            elif natural_idx < self.model.nin - 1:
+                # If scheme is 0, should not encode the last
+                # variable.
+                self.model.EncodeInput(data_to_encode,
+                                       natural_col=natural_idx,
+                                       out=inp[:, l:r])
+
+    @profile
+    def _forward_encoded_input(self, inp, sampling_ordering):
+        if hasattr(self.model, 'do_forward'):
+            if isinstance(self.model, made.MADE):
+                inv = utils.InvertOrder(sampling_ordering)
+                logits = self.model.do_forward(inp, inv)
+            else:
+                logits = self.model.do_forward(inp, sampling_ordering)
+        else:
+            if self.traced_fwd is not None:
+                logits = self.traced_fwd(inp)
+            else:
+                logits = self.model.forward_with_encoded_input(inp)
+        return logits
+
+    @profile
+    def _sample_n(self,
+                  num_samples,
+                  ordering,
+                  columns,
+                  operators_list,
+                  vals_list,
+                  inp=None, train_virtual_cols=True):
+
+        ncols = len(columns)
+        logits = self.init_logits
+        if inp is None:
+            inp = self.inp.view(self.batch_size*self.num_samples, -1)
+        else:
+            inp = inp.view(self.batch_size*self.num_samples, -1)
+        masked_probs = []
+        valid_i_list = [[None] * ncols for i in range(self.batch_size)]
+
+        inp_list = [None] * ncols
+
+        # print(self.batch_size)
+        # print(len(self.factor_mask_list))
+
+        #   Actual progressive sampling.  Repeat:
+        #   Sample next var from curr logits -> fill in next var
+        #   Forward pass -> curr logits
+
+        for i in range(ncols):
+            natural_idx = i if ordering is None else ordering[i]
+
+            # list of length (self.batch_size) recording if the column has filter
+            indicator_i = [not(operators[natural_idx] is None) for operators in operators_list]
+
+            dvs = columns[natural_idx].all_distinct_values
+            operators_current_list = [operators[natural_idx] for operators in operators_list]
+            vals_current_list = [vals[natural_idx] for vals in vals_list]
+
+
+            # using valid_i_batch because valid_i_list has been used
+            valid_i_batch, has_mask_list = self._get_valids(
+                dvs, operators_current_list, vals_current_list,
+                natural_idx, num_samples, indicator_i)
+            
+
+
+            num_classes = len(dvs)
+
+            # This line triggers a host -> gpu copy, showing up as a
+            # hotspot in cprofile.
+            for j in range(self.batch_size):
+                valid_i_list[j][i] = torch.as_tensor(valid_i_batch[j], device=self.device)
+            
+            valid_i_batch = [item[i] for item in valid_i_list]
+            for j in range(self.batch_size):
+                if len(list(valid_i_batch[j].size())) == 0:
+                    valid_i_batch[j] = torch.ones((num_samples, num_classes), device=self.device)
+                elif len(list(valid_i_batch[j].size())) == 1:
+                    valid_i_batch[j] = valid_i_batch[j].repeat(num_samples, 1)
+
+            # shape (batch_size, num_samples, num_classes)
+            valid_i_batch = torch.stack(valid_i_batch)
+            # shape (batch_size*num_samples, num_classes)
+            valid_i_batch = valid_i_batch.view(self.batch_size*num_samples, -1)
+
+            # send tensor.to gpu
+            valid_i_batch = valid_i_batch.to(self.device)
+
+            logits_i = self.model.logits_for_col(
+                natural_idx, logits, out=None) # [batch_size, num_class]? if i==0 or all wildcard column; [bs*num_samples, col_colsize] if i>0;
+
+            # dimension of probs_i is (batch_size, num_classes] for i ==0, and (batch_size*num_sampels, num_classes] 
+            probs_i = torch.softmax(logits_i, 1)
+
+            # change shape of probs_i to [bs*num_samples, col_colsize] if i==0 or all wildcard column
+            if probs_i.shape[0] == self.batch_size:
+                probs_i = torch.repeat_interleave(probs_i, self.num_samples, dim=0)
+
+            # probs_i and valid_i_batch both have shape (batch_size * num_samples, num_classes)
+            probs_i = probs_i * valid_i_batch
+            
+            # shape (batch_size * num_samples, 1)
+            probs_i_summed = probs_i.sum(1)
+
+
+            # shape (batch_size, 1)
+            indicator_i_tensor = torch.tensor(indicator_i, device=self.device)
+            indicator_i_tensor = indicator_i_tensor.view(self.batch_size, 1)
+
+
+            probs_i_summed = probs_i_summed.view(self.batch_size, -1) # [bs, num_samples]
+            ones_probs_i_summed = torch.ones(self.batch_size, probs_i_summed.shape[1], device=self.device)
+            # indicator_i.repeat(1, num_samples)
+            probs_i_summed = torch.where(indicator_i_tensor==0, ones_probs_i_summed, probs_i_summed) # [bs, num_samples]
+            masked_probs.append(probs_i_summed)
+
+            if i == ncols - 1:
+                break
+
+            inf_tensor = [float('-inf')] * logits_i.shape[1] # [col_size]
+            inf_tensor = torch.as_tensor(inf_tensor, dtype=torch.float32, device=self.device)
+
+            # shape of logits_i_n should be [bs*num_samples, col_colsize] 
+            if logits_i.shape[0] == self.batch_size:
+                logits_i_n = torch.repeat_interleave(logits_i, self.num_samples, dim=0)
+            else:
+                logits_i_n = logits_i
+
+            logits_i_n = torch.where(valid_i_batch==0, inf_tensor, logits_i_n) 
+
+
+            # if columns[natural_idx].name.find("production_year") != -1:
+            #     # print("fix production year column!")
+            #     # print(columns[natural_idx].name)
+            #     probs_i_batch =  torch.nn.functional.softmax(logits_i_n)
+            #     dist = torch.distributions.categorical.Categorical(probs_i_batch)
+            #     # shape (batch_size * num_samples, 1)
+            #     samples_i_batch_int = dist.sample()
+            #     samples_i_batch = torch.empty((self.batch_size*num_samples, num_classes), device=self.device)
+            #     samples_i_batch.zero_()
+            #     # print(samples_i_batch_int.shape)
+            #     # print(samples_i_batch.shape)
+            #     # print(logits_i_n.shape)
+            #     samples_i_batch.scatter_(1, torch.unsqueeze(samples_i_batch_int, 1), 1)
+            # else:
+            #     # shape (batch_size * num_samples, num_classes)
+            #     samples_i_batch = torch.nn.functional.gumbel_softmax(logits_i_n, tau=self.tau, hard=True)
+
+            # shape (batch_size * num_samples, num_classes)
+            samples_i_batch = torch.nn.functional.gumbel_softmax(logits_i_n, tau=self.tau, hard=True)
+
+            # Only Factorized PS should go down this path.
+            self.update_factor_mask(samples_i_batch.view(self.batch_size, num_samples, -1),
+                                        vals_current_list, natural_idx, has_mask_list, is_onehot=True)
+
+            data_to_encode = samples_i_batch
+
+            if self.shortcircuit:
+                if not isinstance(self.model, transformer.Transformer):
+                    wildcard_inp_candidate = self.model.EncodeInput(
+                        None,
+                        natural_col=natural_idx,
+                        is_onehot=self.is_training) # [1, encode_size of i]
+
+                    #wildcard_inp_candidate.repeat(self.batch_size * self.num_samples, 1)
+
+                    normal_inp_candidate = self.model.EncodeInput(
+                            data_to_encode,
+                            natural_col=natural_idx,
+                            is_onehot=self.is_training) # [bs*num_sample, encode_size of i]
+
+                    indicator_i_tensor = torch.repeat_interleave(indicator_i_tensor, self.num_samples,
+                                                                    dim=0)
+
+                    normal_candidate = torch.where(indicator_i_tensor==0, wildcard_inp_candidate,
+                                                    normal_inp_candidate)
+                    inp_list[natural_idx] = normal_candidate
+                else:  # Transformer has not implemented
+                    return 0
+
+
+
+            if i == ncols - 1:
+                break
+
+            inp_res = []
+            count_id = 0
+
+            for col_inp in inp_list:
+                if col_inp is None:
+                    if count_id == 0:
+                        inp_res.append(inp[:, :self.model.input_bins_encoded_cumsum[0]])
+                    else:
+                        l = self.model.input_bins_encoded_cumsum[count_id - 1]
+                        r = self.model.input_bins_encoded_cumsum[count_id]
+                        inp_res.append(inp[:, l:r])
+                else:
+                    inp_res.append(col_inp)
+                count_id += 1
+
+            inp_res_tensor = torch.cat(inp_res, dim=1)
+
+            next_natural_idx = i + 1 if ordering is None else ordering[i + 1]
+            indicator_i_next = [not(operators[next_natural_idx] is None) for operators in operators_list]
+            indicator_i_next_tensor = torch.tensor(indicator_i_next, device=self.device)
+
+            if torch.any(indicator_i_next_tensor > 0):
+                logits = self._forward_encoded_input(inp_res_tensor,
+                                                 sampling_ordering=ordering)
+        # Debug outputs.
+        if 'VERBOSE' in os.environ:
+            self._print_probs(columns, operators, vals, ordering, masked_probs)
+
+        if len(masked_probs) > 1:
+            # Doing this convoluted scheme because m_l[0] is a scalar, and
+            # we want the correct shape to broadcast.
+            p = masked_probs[1]
+            for ls in masked_probs[2:]:
+                p = p * ls
+            p = p * masked_probs[0]
+        else:
+            p = masked_probs[0]
+
+        if self.do_fanout_scaling:
+            num_fanouts = self.num_tables - 1
+            num_indicators = self.num_tables
+
+            return self._scale_probs(columns, operators_list, vals_list, p, ordering,
+                                     num_fanouts, num_indicators, inp_list, inp, train_virtual_cols)
+
+        return p.mean(dim=1)
+
+    def _StandardizeQuery(self, columns_list, operators_list, vals_list):
+        result_columns, result_operators_list, result_vals_list = FillInUnqueriedColumnsBatch(self.table, columns_list, operators_list, vals_list)
+        return result_columns, result_operators_list, result_vals_list
+
+    def Query(self, columns_list, operators_list, vals_list):
+        
+        # print("batch size")
+        # print(self.batch_size)
+        # print(len(columns_list))
+
+        # Massages queries into natural order.
+        columns, operators_list, vals_list = self._StandardizeQuery(
+            columns_list, operators_list, vals_list)
+
+        ordering = None
+        if hasattr(self.model, 'orderings'):
+            ordering = self.model.orderings[0]
+            orderings = self.model.orderings
+        elif hasattr(self.model, 'm'):
+            # MADE.
+            ordering = self.model.m[-1]
+            orderings = [self.model.m[-1]]
+        else:
+            print('****Warning: defaulting to natural order')
+            ordering = np.arange(len(columns))
+            orderings = [ordering]
+
+        num_orderings = len(orderings)
+
+        inp_buf = self.inp.zero_()
+
+        if num_orderings == 1:
+            ordering = orderings[0]
+            inv_ordering = utils.InvertOrder(ordering)
+            p = self._sample_n(
+                self.num_samples,
+                # MADE's 'orderings', 'm[-1]' are in an inverted space
+                # --- opposite semantics of what _sample_n() and what
+                # Transformer's ordering expect.
+                ordering if isinstance(self.model, transformer.Transformer)
+                else inv_ordering,
+                columns,
+                operators_list,
+                vals_list,
+                inp=inp_buf, train_virtual_cols=self.train_virtual_cols)
+            # if os.environ.get('VERBOSE', None) == 2:
+            #     print('density={}'.format(p))
+            #     print('scaling with', self.cardinality, '==',
+            #           p * self.cardinality)
+
+            return p * self.cardinality
+
+        # Num orderings > 1.
+        ps = []
+        self.OnStart()
+        for ordering in orderings:
+            ordering = ordering if isinstance(
+                self.model,
+                transformer.Transformer) else utils.InvertOrder(ordering)
+            ns = self.num_samples // num_orderings
+            if ns < 1:
+                print("WARNING: rounding up to 1", self.num_samples,
+                      num_orderings)
+                ns = 1
+            p_scalar = self._sample_n(ns, ordering, columns, operators,
+                                      vals, train_virtual_cols=self.train_virtual_cols)
+            ps.append(p_scalar)
+        self.OnEnd()
+
+        if np.mean(ps) == np.inf:
+            # Sometimes happens for under-trained models.
+            print('WARNING: clipping underflows to 0;', ps)
+            ps = np.nan_to_num(ps, posinf=0)
+
+        print('np.mean(ps)', np.mean(ps), 'self.cardinality',
+              self.cardinality, 'prod',
+              np.mean(ps) * self.cardinality, 'ceil',
+              np.ceil(np.mean(ps) * self.cardinality))
+        return np.ceil(np.mean(ps) * self.cardinality).astype(
+            dtype=np.int64, copy=False)
+
+class BatchDifferentiableFactorizedProgressiveSampling(BatchDifferentiableProgressiveSampling):
+    """Additional logic for handling column factorization."""
+
+    def __init__(self,
+                 model,
+                 fact_table,
+                 r,
+                 join_spec=None,
+                 device=None,
+                 seed=False,
+                 cardinality=None,
+                 shortcircuit=False,
+                 do_fanout_scaling=None,
+                 is_training=True,
+                 tau=1.,
+                 bs=None,
+                 train_virtual_cols=True,
+                 batch_size=20):
+        self.fact_table = fact_table
+        self.base_table = fact_table.base_table
+        self.factor_mask_list = [None] * batch_size
+
+        super(BatchDifferentiableFactorizedProgressiveSampling,
+              self).__init__(model, fact_table, r, join_spec, device, seed,
+                             cardinality, shortcircuit, do_fanout_scaling, is_training,
+                             tau, bs, train_virtual_cols, batch_size)
+
+    def __str__(self):
+        if self.num_samples:
+            n = self.num_samples
+        else:
+            n = int(self.r * self.base_table.columns[0].DistributionSize())
+        return 'fact_psample_{}'.format(n)
+
+    def _StandardizeQuery(self, columns_list, operators_list, vals_list):
+        # self.original_query = (columns, operators, vals)
+        # cols_list, ops_list, vals_list = FillInUnqueriedColumnsBatch(self.base_table, columns,
+        #                                          operators, vals)
+        # cols, ops, vals, dominant_ops = ProjectQuery(self.fact_table, cols, ops,
+        #                                              vals)
+        # self.dominant_ops = dominant_ops
+        # return cols, ops, vals
+        cols, ops_list, vals_list = FillInUnqueriedColumnsBatch(self.base_table, columns_list,
+                                                     operators_list, vals_list)
+    
+        operators_list_res = []
+        vals_list_res = []
+        self.dominant_ops_list = []
+        for operators, values in zip(ops_list, vals_list):
+            fact_cols, ops, vals, dominant_ops = ProjectQuery(self.fact_table, cols, operators,
+                                                         values)
+            
+            operators_list_res.append(ops)
+            vals_list_res.append(vals)    
+            self.dominant_ops_list.append(dominant_ops)
+        return fact_cols, operators_list_res, vals_list_res
+
+    def _BatchStandardizeQuery(self, columns_list, operators_list, vals_list):
+        #self.original_query = (columns, operators, vals)
+        cols, ops_list, vals_list = FillInUnqueriedColumnsBatch(self.base_table, columns_list,
+                                                     operators_list, vals_list)
+    
+        operators_list_res = []
+        vals_list_res = []
+        self.dominant_ops_list = []
+        for operators, vals in zip(ops_list, vals_list):
+            fact_cols, ops, vals, dominant_ops = ProjectQuery(self.fact_table, cols, operators,
+                                                         vals)
+            
+            operators_list_res.append(ops)
+            vals_list_res.append(vals)    
+            self.dominant_ops_list.append(dominant_ops)
+        return fact_cols, operators_list_res, vals_list_res
+
+
+    @profile
+    def _get_valids(self, distinct_values, op_list, val_list, natural_idx, num_samples, indicator_i):
+        """Returns a valid mask of shape (), (size(col)) or (N, size(col)).
+
+        For columns that are not factorized, the first dimension is trivial.
+        For columns that are not filtered, both dimensions are trivial.
+        N is the number of constrains applied to this column.
+        """
+        # Indicates whether valid values for this column depends on samples
+        # from previous columns.  Only used for factorized columns with
+        # >/</>=/<=/!=/IN.By default this is False.
+        valid_list = []
+        has_mask_list = []
+        for j in range(self.batch_size):
+            op = op_list[j]
+            val = val_list[j]
+            has_mask = False
+            # Column i.
+            if op is not None:
+                # There exists a filter.
+                if self.fact_table.columns[natural_idx].factor_id is None:
+                    # This column is not factorized.
+                    distinct_values_rm, removed_nan = self._maybe_remove_nan(
+                        distinct_values)
+
+                    valids = [OPS[o](distinct_values_rm, v) for o, v in zip(op, val)]
+                    valid = np.logical_and.reduce(valids, 0).astype(np.float32,
+                                                                    copy=False)
+                    if removed_nan:
+                        # NaN is always an invalid sample target, unless op is
+                        # IS_NULL.
+                        v = 1. if op == ['IS_NULL'] else 0.
+                        valid = np.insert(valid, 0, v)
+                else:
+                    # This column is factorized.  `valid` stores the valid values
+                    # for this column for each operator.  At the very end, combine
+                    # the valid values for the operators via logical and.
+                    valid = np.ones((len(op), len(distinct_values)), np.bool)
+                    for i, (o, v) in enumerate(zip(op, val)):
+                        # Handle the various operators.  For ops with a mask, we
+                        # add a new dimension so that we can add the mask.  Refer
+                        # to `update_factor_mask` for description
+                        # of self.factor_mask.
+                        if o in common.PROJECT_OPERATORS.values(
+                        ) or o in common.PROJECT_OPERATORS_LAST.values():
+                            valid[i] &= OPS[o](distinct_values, v)
+                            has_mask = True
+                            if self.fact_table.columns[natural_idx].factor_id > 0:
+                                if len(valid.shape) != 3:
+                                    valid = np.tile(np.expand_dims(valid, 1),
+                                                    (1, num_samples, 1))
+                                assert valid.shape == (len(op), num_samples,
+                                                    len(distinct_values))
+                                expanded_mask = np.expand_dims(
+                                    self.factor_mask_list[j][i], 1)
+                                assert expanded_mask.shape == (num_samples, 1)
+                                valid[i] |= expanded_mask
+                        # IN is special case.
+                        elif o == 'IN':
+                            has_mask = True
+                            v_list = np.array(list(v))
+                            matches = distinct_values[:, None] == v_list
+                            assert matches.shape == (len(distinct_values),
+                                                    len(v_list)), matches.shape
+                            if self.fact_table.columns[natural_idx].factor_id > 0:
+                                if len(valid.shape) != 3:
+                                    valid = np.tile(np.expand_dims(valid, 1),
+                                                    (1, num_samples, 1))
+                                assert valid.shape == (
+                                    len(op), num_samples,
+                                    len(distinct_values)), valid.shape
+                                matches = np.tile(matches, (num_samples, 1, 1))
+                                expanded_mask = np.expand_dims(
+                                    self.factor_mask_list[j][i], 1)
+                                matches &= expanded_mask
+                            valid[i] = np.logical_or.reduce(
+                                matches, axis=-1).astype(np.float32, copy=False)
+                        else:
+                            valid[i] &= OPS[o](distinct_values, v)
+                    valid = np.logical_and.reduce(valid, 0).astype(np.float32,
+                                                                copy=False)
+                    assert valid.shape == (num_samples,
+                                        len(distinct_values)) or valid.shape == (
+                                            len(distinct_values),), valid.shape
+            else:
+                # This column is unqueried.  All values are valid.
+                valid = 1.0
+
+            # Reset the factor mask if this col is not factorized
+            # or if this col is the first subvar
+            # or if we don't need to maintain a mask for this predicate.
+            if self.fact_table.columns[natural_idx].factor_id in [None, 0
+                                                                ] or not has_mask:
+                self.factor_mask_list[j] = None
+            
+            valid_list.append(valid)
+            has_mask_list.append(has_mask)
+
+        return valid_list, has_mask_list
+
+    @profile
+    def update_factor_mask(self, s, val_list, natural_idx, has_mask_list, is_onehot=False):
+        """Updates the factor mask for the next iteration.
+
+        the purpose of this function is to update self.factor_mask
+
+        Factor mask is a list of length len(ops).  Each element in the list is
+        a numpy array of shape (N, ?)  where the second dimension can be
+        different sizes for different operators, indicating where a previous
+        factor dominates the remaining for a column.
+
+        We keep a separate mask for each operator for cases where there are
+        multiple conditions on the same col. In these cases, there can be
+        situations where a subvar dominates or un-dominates for one condition
+        but not for others.
+
+        The reason we need special handling is for cases like this: Let's say
+        we have factored column x = (x1, x2) and literal y = (y1, y2) and the
+        predicate is x > y.  By default we assume conjunction between subvars
+        and so x>y would be treated as x1>y1 and x2>y2, which is incorrect.
+
+        The correct handling would be
+        x > y iff
+            (x1 >= y1 and x2 > y2) OR
+            x1 > y1.
+        Because x1 contains the most significant bits, if x1>y1, then x2 can be
+        anything.
+
+        For the general case where x is factorized as (x1...xN) and y is
+        factorized as (y1...yN),
+        x > y iff
+            (x1 >= y1 and x2 >= y2 and ... xN > yN) OR
+            x1 > y1 OR x2 > y2 ... OR x(N-1) > y(N-1).
+        To handle this, as we perform progressive sampling, we apply a
+        "dominant operator" (> for this example) to the samples, and keep a
+        running factor_mask that gets OR'd for calculating future valid
+        vals. This function handles this.
+
+        Other Examples:
+            factored column x = (x1, x2), literals y = (y1, y2), z = (z1, z2)
+            x < y iff
+                (x1 <= y1 and x2 < y2) OR
+                x1 < y1.
+            x >= y iff
+                (x1 >= y1 and x2 >= y2) OR
+                x1 > y1.
+            x <= y iff
+                (x1 <= y1 and x2 <= y2) OR
+                x1 < y1.
+            x != y iff
+                (any(x1) and x2 != y2) OR
+                x1 != y1
+
+        IN predicates are handled differently because instead of a single
+        literal, there is a list of values. For example,
+        x IN [y, z] if
+                (x1 == y1 and x2 == y2) OR
+                (x1 == z1 and x2 == z2)
+
+        This function is called after _get_valids().  Note that _get_valids()
+        would access self.factor_mask only after the first subvar for a given
+        var (natural_idx).  By that time self.factor_mask has been assigned
+        during the first invocation of this function.  Field self.factor_mask
+        is reset to None by _get_valids() whenever we move to a new
+        original-space column, or when the column has no operators that need
+        special handling.
+        """
+        if is_onehot:
+            s = torch.argmax(s, dim=2)
+        s = s.cpu().numpy()
+        for b in range(self.batch_size):
+            if has_mask_list[b]:
+                s_current = s[b]
+                if self.factor_mask_list[b] is None:
+                    self.factor_mask_list[b] = [None] * len(self.dominant_ops_list[b][natural_idx])
+                for i, (p_op_dominant,
+                        v) in enumerate(zip(self.dominant_ops_list[b][natural_idx], val_list[b])):
+                    if p_op_dominant == 'IN':
+                        # Mask for IN should be size (N, len(v))
+                        v_list = list(v)
+                        new_mask = s_current[:, None] == v_list
+                        # In the example above, for each sample s_i,
+                        # new_mask stores
+                        # [
+                        #   (s_i_1 == y1 and s_i_2 == y2 ...),
+                        #   (s_i_1 == z1 and s_i_2 == z2 ...),
+                        #   ...
+                        # ]
+                        # As we sample, we &= the current mask with previous masks.
+                        assert new_mask.shape == (len(s_current), len(v_list)), new_mask.shape
+                        if self.factor_mask_list[b][i] is not None:
+                            new_mask &= self.factor_mask_list[b][i]
+                    elif p_op_dominant in common.PROJECT_OPERATORS_DOMINANT.values():
+                        new_mask = OPS[p_op_dominant](s_current, v)
+                        if self.factor_mask_list[b][i] is not None:
+                            new_mask |= self.factor_mask_list[b][i]
+                    else:
+                        assert p_op_dominant is None, 'This dominant operator ({}) is not supported.'.format(
+                            p_op_dominant)
+                        new_mask = np.zeros_like(s_current, dtype=np.bool)
+                        if self.factor_mask_list[b][i] is not None:
+                            new_mask |= self.factor_mask_list[b][i]
+                    self.factor_mask_list[b][i] = new_mask
+
+                    
 class JoinSampling(CardEst):
     """Draws tuples using a join sampler.
 
