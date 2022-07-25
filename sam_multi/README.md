@@ -27,7 +27,7 @@ To reproduce our resutls and generate database from the pretrained model from th
 'total_iterations': 1000
 ```
 
-*To speedup the generation process, use a larger [`'save_frequency'`].
+*To speedup the generation process, use a larger `'save_frequency'`.
 
 ### SAM model training
 SAM uses [UAEQ](https://github.com/pagegitss/UAE) to train a deep autoregressive model from query workloads, 
