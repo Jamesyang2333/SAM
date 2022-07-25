@@ -58,7 +58,7 @@ To reproduce our results and generate database using the pretrained model from t
 The sample test set of 1000 queries can be found at [`./queries/mscn_sample_1000.sql`](./queries/mscn_sample_1000.sql)
 
 ### SAM model training
-SAM uses [UAEQ](https://github.com/pagegitss/UAE) to train a deep autoregressive model from query workloads, 
+SAM uses [UAE-Q](https://github.com/pagegitss/UAE) to train a deep autoregressive model from query workloads, 
 
 To train the model from the full MSCN dataset
 ```
