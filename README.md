@@ -50,7 +50,7 @@ create table cast_info (movie_id int, role_id int, person_id int);
 copy cast_info from '/SAM/sam_multi/generated_database/imdb/cast_info_100.csv' delimiter ',' header csv;
 ```
 
-Run a sample of 1000 training queries on the generated database and get the result Q-error:
+Run the 400 training queries on the generated database and get the result Q-error:
 ```
 python query_execute.py
 ```
