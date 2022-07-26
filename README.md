@@ -10,7 +10,7 @@ This project contains two main directories:
 
 [`./sam_multi`](./sam_multi): SAM for multi-relation database generation
 
-Here we give a quick example of using SAM to generate the IMDB database from pre-trained autoregressive model. More detailed instructions on SAM can be found in the README of the respective directories.
+Here we give a quick example (~10 minutes) of using SAM to generate the IMDB database from pre-trained autoregressive model. More detailed instructions on SAM can be found in the README of the respective directories.
 
 Set up the conda environment for the project:
 ```
