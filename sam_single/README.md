@@ -17,11 +17,10 @@ python gen_data_model.py --dataset dmv --residual --layers=2 --fc-hiddens=128 --
 ```
 The generated relation is saved at `./generated_data_tables`.
 
-**Test the generated database** 
+**Test the generated database** Run 1000 test queries on the generated database. The last 1000 queries in the generated workload are test queries.
 ```
-python eval_model.py --dataset dmv --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --glob uaeq0.pt
-
- python eval_model.py --dataset census --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --glob uaeq-census-q_bs-200-25epochs-psample-200-seed-0-tau-1.0-layers-2-lr-0.0005-queries-20000-ratio-0.75.pt
+python query_execute_single.py --dataset census
+python query_execute_single.py --dataset dmv
 ```
 
 
@@ -30,13 +29,13 @@ SAM uses [UAE-Q](https://github.com/pagegitss/UAE) to train a deep autoregressiv
 
 To train the model from the full MSCN dataset
 ```
-python run_uae.py --run job-light-ranges-mscn-workload
+python train_uae.py --num-gpus=1 --dataset=census --epochs=50 --constant-lr=5e-4 --run-uaeq  --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --workload-size 20000 --q-bs 200
+python train_uae.py --num-gpus=1 --dataset=census --epochs=50 --constant-lr=5e-4 --run-uaeq  --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --workload-size 20000 --q-bs 200
 ```
 
 To test the model
 ```
+python eval_model.py --dataset census --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --glob dmv_pretrained.pt
 python eval_model.py --dataset dmv --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --glob census_pretained.pt
-
- python eval_model.py --dataset census --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --glob dmv_pretrained.pt
 ```
 
