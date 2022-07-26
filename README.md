@@ -2,7 +2,7 @@
 SAM is a learning-based method for high-fidelity database generation using deep autoregressive models.
 <p align="center">
     <br>
-    <img src="./assets/overview.png" width="850"/>
+    <img src="./assets/overview.png" width="600"/>
 <p>
 Your can learn more about SAM in our SIGMOD 2022 paper, [SAM: Database Generation from Query Workloads with Supervised Autoregressive Models](https://dl.acm.org/doi/abs/10.1145/3514221.3526168).
 
