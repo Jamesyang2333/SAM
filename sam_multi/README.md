@@ -13,7 +13,7 @@ bash scripts/download_imdb.sh
 
 **Database Generation** To generate database from trained models using SAM, use the following commands.
 ```
-python run_dbgen.py --run job-light-ranges-reload 
+python run_dbgen.py --run data-generation-job-light-mscn-worklod
 ```
 By default, this generates the database using the model [`./models/uaeq-mscn-400.pt`](./models/uaeq-mscn.pt). The generation process runs for 100 iterations. The generated data csv files are saved at `./generated_database/imdb`.
 
