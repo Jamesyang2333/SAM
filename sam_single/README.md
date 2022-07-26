@@ -30,7 +30,7 @@ SAM uses [UAE-Q](https://github.com/pagegitss/UAE) to train a deep autoregressiv
 To train the model from the full MSCN dataset
 ```
 python train_uae.py --num-gpus=1 --dataset=census --epochs=50 --constant-lr=5e-4 --run-uaeq  --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --workload-size 20000 --q-bs 200
-python train_uae.py --num-gpus=1 --dataset=census --epochs=50 --constant-lr=5e-4 --run-uaeq  --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --workload-size 20000 --q-bs 200
+python train_uae.py --num-gpus=1 --dataset=dmv --epochs=50 --constant-lr=5e-4 --run-uaeq  --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --workload-size 20000 --q-bs 200
 ```
 
 To test the model
