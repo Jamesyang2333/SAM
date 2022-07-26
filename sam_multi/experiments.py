@@ -678,7 +678,7 @@ TEST_CONFIGS['data-generation-job-light-MSCN-worklod'] = dict(
         'eval_psamples': [1000, 8000],
         'subqueries_csv':None,
         # Location to store the generated database
-        'folder_name': 'generated_database/imdb',
+        'folder_name': './generated_database/imdb',
         # Name of pk table
         'pk_table': 'title',
         # Schema of generated database

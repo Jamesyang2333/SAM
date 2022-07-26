@@ -1134,8 +1134,10 @@ class SAM(tune.Trainable):
                                     generated_fk_tables[table_id][value_str] += fk_list
 
                     folder_name = self.folder_name
+                    if not os.path.exists(folder_name):
+                        os.makedirs(folder_name)
                     print("saving generated tables...")
-                    res_file = open('./{}/{}_{}.csv'.format(folder_name, self.join_tables[self.pk_table_id], str(iter_num)), 'w', encoding="utf8")
+                    res_file = open('{}/{}_{}.csv'.format(folder_name, self.join_tables[self.pk_table_id], str(iter_num)), 'w', encoding="utf8")
                     header_str = self.generation_cols[self.join_tables[self.pk_table_id]+".csv"][0]
                     for col_name in self.content_cols[self.pk_table_id]:
                         header_str = header_str+",{}".format(col_name)
@@ -1158,7 +1160,7 @@ class SAM(tune.Trainable):
                     for table_id in fk_table_idx:
                         generated_fk_table = generated_fk_tables[table_id]
 
-                        res_file = open('./{}/{}_{}.csv'.format(folder_name, self.join_tables[table_id], str(iter_num)), 'w', encoding="utf8")
+                        res_file = open('{}/{}_{}.csv'.format(folder_name, self.join_tables[table_id], str(iter_num)), 'w', encoding="utf8")
                         header_str = self.generation_cols[self.join_tables[table_id]+".csv"][0]
                         for col_name in self.content_cols[table_id]:
                             header_str = header_str+",{}".format(col_name)
