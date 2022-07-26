@@ -18,7 +18,7 @@ test_num = 20000
 # print(sample_frame.head())
 # print(sample_frame[0])
 # sample_table = datasets.LoadCensus(sample_frame)
-csv_file = ""
+csv_file = "./generated_data_tables/dmv_test.csv"
 cols = [
         'Record Type', 'Registration Class', 'State', 'County', 'Body Type',
         'Fuel Type', 'Reg Valid Date', 'Color', 'Scofflaw Indicator',
