@@ -24,7 +24,7 @@ cd sam_multi
 bash scripts/download_imdb.sh
 ```
 
-Generate the IMDB database using the pretrained model at [`./sam_multi/models/uaeq-mscn-400.pt`](./sam_multi/models/uaeq-mscn-400.pt), and runs for 100 iterations. The model is trained from the first 400 queries in the MSCN workload. The generated data csv files are saved at `./sam_multi/generated_database/imdb`.
+Generate the IMDB database using the pretrained model at [`./sam_multi/models/uaeq-mscn-400.pt`](./sam_multi/models/uaeq-mscn-400.pt). The model is trained from the first 400 queries in the MSCN workload. The generated data csv files are saved at `./sam_multi/generated_database/imdb`.
 ```
 python run_dbgen.py --run data-generation-job-light-MSCN-worklod
 ```
