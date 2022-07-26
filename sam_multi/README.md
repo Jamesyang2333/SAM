@@ -15,7 +15,7 @@ bash scripts/download_imdb.sh
 ```
 python run_dbgen.py --run job-light-ranges-reload 
 ```
-By default, this generates the database using the model [`./models/uaeq-mscn-400.pt`](./models/uaeq-mscn.pt). The generation process runs for 100 iterations.
+By default, this generates the database using the model [`./models/uaeq-mscn-400.pt`](./models/uaeq-mscn.pt). The generation process runs for 100 iterations. The generated data csv files are saved at `./generated_database/imdb`.
 
 **Test the generated database** To test the fidelity of generated database, import the files to a PostgreSQL database:
 ```sql
@@ -40,7 +40,7 @@ copy cast_info from '/SAM/sam_multi/generated_database/imdb/cast_info_100.csv' d
 
 Run the 400 training queries ([`./queries/mscn_400.sql`](./queries/mscn_400.sql)) on the generated database and get the result Q-error:
 ```
-python query_execute.py
+python query_execute.py --queries ./queries/mscn_400.sql --cards ./queries/mscn_400_card.csv
 ```
 
 ### Configuration for database generation
@@ -55,7 +55,7 @@ To reproduce our results and generate database using the pretrained model from t
 
 *To speedup the generation process, use a larger `'save_frequency'`.
 
-The sample test set of 1000 queries can be found at [`./queries/mscn_sample_1000.sql`](./queries/mscn_sample_1000.sql)
+The sample test set of 1000 queries can be found at [`./queries/mscn_sample_1000.sql`](./queries/mscn_sample_1000.sql) and [`./queries/mscn_sample_100_card.csv`](./queries/mscn_sample_1000_card.csv)
 
 ### SAM model training
 SAM uses [UAE-Q](https://github.com/pagegitss/UAE) to train a deep autoregressive model from query workloads, 
