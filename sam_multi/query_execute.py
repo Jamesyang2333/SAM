@@ -1,11 +1,24 @@
 import psycopg2
 import numpy as np
-
+import argparse
 import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--queries',
+                    default="./queries/mscn_400.sql",
+                    type=str,
+                    required=True,
+                    help='Test query file')
+parser.add_argument('--cards',
+                    default="./queries/mscn_400_card.csv",
+                    type=str,
+                    required=True,
+                    help='Test querycardinality file')
+args = parser.parse_args()
 
 conn = psycopg2.connect(
     host="localhost",
-    database="db_gen_uaeq_test_1000",
+    database="db_gen_uaeq_400_test_100",
     user="jingyi",
     port="5444"
 )
@@ -13,9 +26,9 @@ conn = psycopg2.connect(
 cur = conn.cursor()
 
 queries = open(
-    "/home_nfs/jingyi/db_generation/queries/mscn_1000.sql", "r")
+    args.queries, "r")
 cards = open(
-    "/home_nfs/jingyi/db_generation/queries/mscn_1000_card.csv")
+    args.cards, "r")
 
 card_list = []
 for line in cards:
