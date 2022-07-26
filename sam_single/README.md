@@ -18,6 +18,11 @@ python gen_data_model.py --dataset dmv --residual --layers=2 --fc-hiddens=128 --
 The generated relation is saved at `./generated_data_tables`.
 
 **Test the generated database** 
+```
+python eval_model.py --dataset dmv --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --glob uaeq0.pt
+
+ python eval_model.py --dataset census --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --glob uaeq-census-q_bs-200-25epochs-psample-200-seed-0-tau-1.0-layers-2-lr-0.0005-queries-20000-ratio-0.75.pt
+```
 
 
 ### SAM model training
@@ -28,8 +33,10 @@ To train the model from the full MSCN dataset
 python run_uae.py --run job-light-ranges-mscn-workload
 ```
 
-To test the model on sub-queries of JOB-light
+To test the model
 ```
-python run_uae.py --run uae-job-light-ranges-reload
+python eval_model.py --dataset dmv --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --glob census_pretained.pt
+
+ python eval_model.py --dataset census --residual --layers=2 --fc-hiddens=128 --direct-io --column-masking --glob dmv_pretrained.pt
 ```
 
