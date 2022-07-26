@@ -413,7 +413,7 @@ EXPERIMENT_CONFIGS = {
         'train_queries': 100000,
         'test_queries': 0,
         'train_virtual_cols': True,
-        'run_uaeq': False,
+        'run_uaeq': True,
         'save_result_dir': "test_results/preds/",
         'save_model_dir': "test_results/models/"
         },
@@ -669,7 +669,7 @@ TEST_CONFIGS['uae-job-light-ranges-reload'] = dict(
         'test_queries':0
     })
 
-TEST_CONFIGS['data-generation-job-light-MSCN-worklod'] = dict(
+TEST_CONFIGS['data-generation-job-light-mscn-worklod'] = dict(
     EXPERIMENT_CONFIGS['job-light-ranges'],
     **{
         'queries_csv': 'queries/mscn_400.csv',
