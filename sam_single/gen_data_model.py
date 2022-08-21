@@ -332,7 +332,7 @@ def Main():
 
     selected_ckpts = all_ckpts
 
-    file_str = '../queries/{}_21000.txt'.format(args.dataset)
+    file_str = './queries/{}_21000.txt'.format(args.dataset)
 
 
     with open(file_str, 'r', encoding="utf8") as f:
@@ -378,6 +378,9 @@ def Main():
 
     sampled_num = 0
     generated_tuple_num = 0
+
+    if not os.path.exists('./generated_data_tables'):
+        os.makedirs('./generated_data_tables')
 
     table_res_file = open('./generated_data_tables/{}.csv'.format(args.save_name), 'w', encoding="utf8")
     if args.dataset == 'dmv':

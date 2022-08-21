@@ -7,7 +7,7 @@ import pandas as pd
 import common
 
 def LoadDmv(filename='Vehicle__Snowmobile__and_Boat_Registrations.csv'):
-    csv_file = '../datasets/{}'.format(filename)
+    csv_file = './datasets/{}'.format(filename)
     cols = [
         'Record Type','Registration Class', 'State', 'County', 'Body Type',
         'Fuel Type', 'Reg Valid Date', 'Color', 'Scofflaw Indicator',
@@ -26,7 +26,7 @@ def LoadDmv(filename='Vehicle__Snowmobile__and_Boat_Registrations.csv'):
 #     return common.CsvTable('Adult', csv_file, cols, type_casts, header=None)
 def LoadCensus(filename_or_df='census.csv'):
     if isinstance(filename_or_df, str):
-        filename_or_df = '../datasets/{}'.format(filename_or_df)
+        filename_or_df = './datasets/{}'.format(filename_or_df)
     else:
         assert (isinstance(filename_or_df, pd.DataFrame))
     cols =[0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
