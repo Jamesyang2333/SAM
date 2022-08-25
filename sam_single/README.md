@@ -9,7 +9,7 @@ bash scripts/download_dmv.sh
 
 [`models/census_pretrained.pt`](models/census_pretrained.pt): Trained from a generated workload of 20000 queries ([`queries/census_train.txt`](queries/census_train.txt)).
 
-[`./models/dmv_pretrained.pt`](./models/dmv_pretrained.pt): Trained from a generated workload of 20000 queries ([`./queries/dmv_train.txt`](./queries/dmv_train.txt)).
+[`models/dmv_pretrained.pt`](models/dmv_pretrained.pt): Trained from a generated workload of 20000 queries ([`queries/dmv_train.txt`](queries/dmv_train.txt)).
 
 **Database Generation** To generate database from trained models using SAM, use the following commands.
 ```
