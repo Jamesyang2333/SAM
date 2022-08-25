@@ -332,15 +332,6 @@ def Main():
 
     selected_ckpts = all_ckpts
 
-    file_str = './queries/{}_21000.txt'.format(args.dataset)
-
-
-    with open(file_str, 'r', encoding="utf8") as f:
-        workload_stats = json.load(f)
-    card_list = workload_stats['card_list']
-    query_list = workload_stats['query_list']
-    oracle_cards = [float(card) for card in card_list]
-
     print('ckpts', selected_ckpts)
 
     # OK to load tables now
