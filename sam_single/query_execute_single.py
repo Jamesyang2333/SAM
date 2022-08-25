@@ -11,19 +11,23 @@ from utils import get_qerror
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='dmv', help='Dataset.')
+parser.add_argument('--data-file', type=str, default='./generated_data_tables/dmv.csv', help='Generated data file')
+parser.add_argument('--query-file', type=str, default='./queries/dmv_test.txt', help='Query file')
+
 args = parser.parse_args()
 
-train_data_raw = load_dataset(args.dataset, "./queries/{}_21000.txt".format(args.dataset))
+train_data_raw = load_dataset(args.dataset, args.query_file)
 
-start_idx = 20000
-test_num = 1000
+start_idx = 0
+test_num = len(train_data_raw['val'])
 
 if args.dataset == "census":
-    sample_frame = pd.read_csv("./generated_data_tables/census.csv", header=0, names=[0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+    sample_frame = pd.read_csv(args.data_file, header=0, names=[0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
     sample_frame = sample_frame.astype({0:'float64', 4:'float64', 10:'float64', 11:'float64', 12:'float64'})
     sample_table = datasets.LoadCensus(sample_frame)
 elif args.dataset == "dmv":
-    csv_file = "./generated_data_tables/dmv.csv"
+    csv_file = args.data_file
+
     cols = [
             'Record Type', 'Registration Class', 'State', 'County', 'Body Type',
             'Fuel Type', 'Reg Valid Date', 'Color', 'Scofflaw Indicator',

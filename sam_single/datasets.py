@@ -33,9 +33,3 @@ def LoadCensus(filename_or_df='census.csv'):
     type_casts = {}
     return common.CsvTable('Census', filename_or_df, cols, type_casts, header=None)
 
-
-def LoadCup98(filename='cup98.csv'):
-    csv_file = '../../UAE-github/datasets/{}'.format(filename)
-    cols = [473, 5, 9, 10, 11, 12, 52, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 74, 6, 17, 18, 361, 19, 20, 21, 22, 42, 73, 470, 472, 475, 477, 50, 476, 478, 318, 25, 51, 54, 408, 474, 358, 384, 14, 317, 326, 350, 161, 234, 148, 324, 13, 147, 88, 299, 316, 397, 410, 288, 233, 258, 183, 325, 387, 182, 307, 357, 314, 322, 92, 304, 323, 210, 93, 464, 94, 255, 271, 15, 219, 259, 3, 294, 359, 96, 209, 336, 265, 319, 360, 272, 277]
-    type_casts = {}
-    return common.CsvTable('Cup98', csv_file, cols, type_casts, header=None)
