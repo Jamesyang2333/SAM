@@ -6,9 +6,9 @@
 bash scripts/download_dmv.sh
 ```
 **Pretrained Models** We have provided a pretrained model for each dataset.
-[`models/census_pretrained.pt`](models/census_pretrained.pt): Trained from 20000 queries in the generated workload ([`queries/census_train.txt`](queries/census_train.txt)).
+[`models/census_pretrained.pt`](models/census_pretrained.pt): Trained from a generated workload of 20000 queries ([`queries/census_train.txt`](queries/census_train.txt)).
 
-[`./models/dmv_pretrained.pt`](./models/dmv_pretrained.pt): Trained from 20000 queries in the generated workload ([`./queries/dmv_train.txt`](./queries/dmv_train.txt)).
+[`./models/dmv_pretrained.pt`](./models/dmv_pretrained.pt): Trained from a generated workload of 20000 queries ([`./queries/dmv_train.txt`](./queries/dmv_train.txt)).
 
 **Database Generation** To generate database from trained models using SAM, use the following commands.
 ```
@@ -17,7 +17,7 @@ python gen_data_model.py --dataset dmv --residual --layers=2 --fc-hiddens=128 --
 ```
 The generated relation is saved at `./generated_data_tables`.
 
-**Test the generated database** Run 1000 test queries on the generated database. The last 1000 queries in the generated workload are test queries.
+**Test the generated database** Run 1000 test queries on the generated database.
 ```
 python query_execute_single.py --dataset census --data-file ./generated_data_tables/census.csv --query-file ./queries/census_test.txt
 python query_execute_single.py --dataset dmv --data-file ./generated_data_tables/dmv.csv --query-file ./queries/dmv_test.txt
