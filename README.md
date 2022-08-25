@@ -11,9 +11,9 @@ Your can learn more about SAM in our SIGMOD 2022 paper, [SAM: Database Generatio
 ## Getting Started
 This project contains two main directories:
 
-[`./sam_single`](./sam_single): SAM for single-relation database generation
+[`sam_single`](sam_single): SAM for single-relation database generation
 
-[`./sam_multi`](./sam_multi): SAM for multi-relation database generation
+[`sam_multi`](sam_multi): SAM for multi-relation database generation
 
 Here we give a quick example (~10 minutes) of using SAM to generate the IMDB database from pre-trained autoregressive model. More detailed instructions on SAM can be found in the README of the respective directories.
 
@@ -75,3 +75,6 @@ python query_execute.py --queries ./queries/mscn_400.sql --cards ./queries/mscn_
 
 ## Acknowledgements
 This project builds on top of [UAE](https://github.com/pagegitss/UAE) and [NeuroCard](https://github.com/neurocard/neurocard).
+
+## License 
+This project is licensed under NTUItive Dual License. You can find the License at [`LICENSE.rtf`](LICENSE.rtf)
