@@ -8,7 +8,7 @@ dependencies:
   - python=3.7.7
   - pytorch==1.4.0
   - torchvision==0.5.0
-  - psycopg2=2.8.4=py37h1ba5d50_0
+  - psycopg2=2.8.4
   - pip
   - pip:
     - pandas==1.0.5
