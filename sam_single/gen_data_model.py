@@ -376,7 +376,7 @@ def Main():
     table_res_file = open('./generated_data_tables/{}.csv'.format(args.save_name), 'w', encoding="utf8")
     if args.dataset == 'dmv':
         table_res_file.write(
-            'Record_Type,Registration_Class,State,County,Body_Type,Fuel_Type,Reg_Valid_Date,Color,Scofflaw_Indicator,Suspension_Indicator,Revocation_Indicator\n')
+            'Record Type,Registration Class,State,County,Body Type,Fuel Type,Reg Valid Date,Color,Scofflaw Indicator,Suspension Indicator,Revocation Indicator\n')
     elif args.dataset == 'census':
         table_res_file.write('c0,c1,c3,c4,c5,c6,c7,c8,c9,c10,c11,c12,c13,c14\n')
 

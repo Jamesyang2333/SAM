@@ -541,7 +541,7 @@ def TrainTask(seed=0, rng=None):
 
     # load train data
 
-    file_str = '../../queries/{}workload_with_card_100000.txt'.format(args.dataset)
+    file_str = './queries/{}_train.txt'.format(args.dataset)
     with open(file_str, 'r', encoding="utf8") as f:
         workload_stats = json.load(f)
     tmp_card_list = workload_stats['card_list'][0: args.workload_size]
